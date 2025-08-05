@@ -1,18 +1,16 @@
 # Network and System Defense Project
----
 
 
 ## Network Topology
----
 
 ### TODO: insert topology image
 
+---
+
 
 ## Network Configuration
----
 
 ### AS100: BGP/MPLS VPN Backbone
----
 
 AS100 is configured as the provider backbone for the customer VPN.
 
@@ -508,7 +506,7 @@ exit
 ```
 
 
-## Testing
+#### Testing
 
 * **OSPF adjacencies**: `show ip ospf neighbor`
 * **LDP sessions**: `show mpls ldp neighbor`
