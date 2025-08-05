@@ -1,21 +1,26 @@
 # Network and System Defense Project
-
-This repository hosts the work developed for the **Network and System Defense** course of a Master in Computer Engineering.
-The project involves the design and configuration of a simulated network infrastructure using **GNS3**.
-
 ---
 
-## AS100: BGP/MPLS VPN Backbone
 
-AS100 is configured as a provider backbone for a customer VPN. The setup uses **FRRouting (FRR)** to implement MPLS, OSPF, and BGP.
-
+## Network Topology
 ---
 
-### Requirements
+### TODO: insert topology image
+
+
+## Network Configuration
+---
+
+### AS100: BGP/MPLS VPN Backbone
+---
+
+AS100 is configured as the provider backbone for the customer VPN.
+
+#### Requirements
 
 * **FRRouting** installed on all routers.
 * Access to the **`vtysh` CLI tool** to manage FRR daemons.
-* Kernel modules for MPLS loaded:
+* Kernel modules for MPLS:
 
   * `mpls-router`
   * `mpls-iptunnel`
@@ -27,30 +32,11 @@ mpls-router
 mpls-iptunnel
 ```
 
----
-
-### General Configuration Steps
-
-Each router follows this order:
-
-1. Configure interfaces
-2. Enable OSPF for IGP routing
-3. Create VRF (`mainVPN`) for the VPN
-4. Set the MPLS parameters
-5. Configure LDP for label distribution
-6. Establish iBGP core peering between border routers
-7. Configure CE-PE dynamic routing through BGP
-8. Define Route Distinguisher and Route Targets
-
----
-
-### 1. R101 Configuration
+#### 1. R101 Configuration
 
 Most considerations made to R101 also apply to the other border routers (R102 and R103).
 
-#### 1.1 Interfaces
-
-Configure the interfaces associated to the customer and core links as well the loopack interface used as the router indentifier within the core network protocols.
+##### 1.1 Interfaces
 
 ```text
 interface eth0
@@ -67,7 +53,7 @@ exit
 !
 ```
 
-#### 1.2 OSPF
+##### 1.2 OSPF
 
 ```text
 router ospf
@@ -78,7 +64,7 @@ exit
 !
 ```
 
-#### 1.3 VRF
+##### 1.3 VRF
 
 Define the VRF to properly manage the traffic related to the sites of the customer VPN.
 
@@ -88,7 +74,7 @@ ip link set mainVPN up
 ip link set eth0 master mainVPN
 ```
 
-#### 1.4 MPLS Setup
+##### 1.4 MPLS Setup
 
 Set the following parameters to the mpls kernel level modules.
 
@@ -105,7 +91,7 @@ net.mpls.platform_labels = 100000
 sysctl -p R101_mpls.conf
 ```
 
-#### 1.5 LDP
+##### 1.5 LDP
 
 This configuration enables label distribution toward the core network via eth1, specifies the loopback interface and the discovery address used at the transport level.
 ```text
@@ -121,7 +107,7 @@ exit
 !
 ```
 
-#### 1.6 iBGP Core Peering
+##### 1.6 iBGP Core Peering
 R101 is a border router, therefore we must configure iBGP to route traffic towards other edge routers to reach the different customer sites.
 
 This configuration forms an overlay newtork between border routers to properly manage routing internally, within AS100. Each border router must know each other.
@@ -150,7 +136,7 @@ exit
 !
 ```
 
-#### 1.7 CE-PE Dynamic Routing
+##### 1.7 CE-PE Dynamic Routing
 
 The following configuration allows to route traffic dynamically between the customer edge and the provider edge, without requiring a less flexible static configuration.
 ```text
@@ -162,7 +148,7 @@ exit
 !
 ```
 
-#### 1.8 RD & RT
+##### 1.8 RD & RT
 This configuration defines:
 
 - A route destinguisher to make potentially overlapping IPv4 addresses from different VPNs unique within the MPLS VPN backbone.
@@ -183,11 +169,10 @@ exit
 !
 ```
 
----
 
-### 2. R102 Configuration
+#### 2. R102 Configuration
 
-#### 2.1 Interfaces
+##### 2.1 Interfaces
 
 ```text
 interface eth0
@@ -204,7 +189,7 @@ exit
 !
 ```
 
-#### 2.2 OSPF
+##### 2.2 OSPF
 
 ```text
 router ospf
@@ -215,7 +200,7 @@ exit
 !
 ```
 
-#### 2.3 VRF
+##### 2.3 VRF
 
 ```text
 ip link add mainVPN type vrf table 10
@@ -223,7 +208,7 @@ ip link set mainVPN up
 ip link set eth0 master mainVPN
 ```
 
-#### 2.4 MPLS Setup
+##### 2.4 MPLS Setup
 
 `R102_mpls.conf`:
 
@@ -240,7 +225,7 @@ Apply:
 sysctl -p R102_mpls.conf
 ```
 
-#### 2.5 LDP
+##### 2.5 LDP
 
 ```text
 mpls ldp
@@ -255,7 +240,7 @@ exit
 !
 ```
 
-#### 2.6 iBGP Core Peering
+##### 2.6 iBGP Core Peering
 
 ```text
 router bgp 100
@@ -281,7 +266,7 @@ exit
 !
 ```
 
-#### 2.7 CE-PE Dynamic Routing
+##### 2.7 CE-PE Dynamic Routing
 
 ```text
 router bgp 100 vrf mainVPN
@@ -292,7 +277,7 @@ exit
 !
 ```
 
-#### 2.8 Spoke-Spoke Communication
+##### 2.8 Spoke-Spoke Communication
 This configuration is required to ensure that spokes are reachable through the hub PE. The hub PE exports a default route to the spokes, so when a spoke tries to communicate with the other, its PE does not have a specific route to the destination PE, but it does have the default route pointing to the hub. The hub PE, in turn, holds the necessary routes to all spokes and can forward traffic accordingly.
 
 ```text
@@ -306,7 +291,7 @@ exit
 
 ```
 
-#### 2.9 RD & RT
+##### 2.9 RD & RT
 
 In this configuration, the hub PE imports all routes received from the spoke PEs and exports its default route to the spokes.
 
@@ -324,11 +309,10 @@ exit
 !
 ```
 
----
 
-### 3. R103 Configuration
+#### 3. R103 Configuration
 
-#### 3.1 Interfaces
+##### 3.1 Interfaces
 
 ```text
 interface eth0
@@ -345,7 +329,7 @@ exit
 !
 ```
 
-#### 3.2 OSPF
+##### 3.2 OSPF
 
 ```text
 router ospf
@@ -356,7 +340,7 @@ exit
 !
 ```
 
-#### 3.3 VRF
+##### 3.3 VRF
 
 ```text
 ip link add mainVPN type vrf table 10
@@ -364,7 +348,7 @@ ip link set mainVPN up
 ip link set eth0 master mainVPN
 ```
 
-#### 3.4 MPLS Setup
+##### 3.4 MPLS Setup
 
 `R103_mpls.conf`:
 
@@ -381,7 +365,7 @@ Apply:
 sysctl -p R103_mpls.conf
 ```
 
-#### 3.5 LDP
+##### 3.5 LDP
 
 ```text
 mpls ldp
@@ -396,7 +380,7 @@ exit
 !
 ```
 
-#### 3.6 iBGP Core Peering
+##### 3.6 iBGP Core Peering
 
 ```text
 router bgp 100
@@ -422,7 +406,7 @@ exit
 !
 ```
 
-#### 3.7 CE-PE Dynamic Routing
+##### 3.7 CE-PE Dynamic Routing
 
 ```text
 router bgp 100 vrf mainVPN
@@ -433,7 +417,7 @@ exit
 !
 ```
 
-#### 3.8 RD & RT
+##### 3.8 RD & RT
 
 ```text
 router bgp 100 vrf mainVPN
@@ -449,13 +433,12 @@ exit
 !
 ```
 
----
 
-### 4. R104 Configuration
+#### 4. R104 Configuration
 
 R104 does not require iBGP peering configuration, as it operates purely as a core (P) router. It only needs to participate in OSPF and LDP; MPLS label switching will handle the transit traffic. Routing between provider edges (PEs) traverses R104 using MPLS labels, with no need for local BGP routing and VPN awareness.
 
-#### 4.1 Interfaces
+##### 4.1 Interfaces
 
 ```text
 interface eth0
@@ -476,7 +459,7 @@ exit
 !
 ```
 
-#### 4.2 OSPF
+##### 4.2 OSPF
 
 ```text
 router ospf
@@ -489,7 +472,7 @@ exit
 !
 ```
 
-#### 4.3 MPLS Parameters
+##### 4.3 MPLS Parameters
 
 `R104_mpls.conf`:
 
@@ -507,7 +490,7 @@ sysctl -p R104_mpls.conf
 ```
 
 
-#### 4.4 LDP
+##### 4.4 LDP
 
 ```text
 mpls ldp
@@ -524,7 +507,6 @@ exit
 !
 ```
 
----
 
 ## Testing
 
