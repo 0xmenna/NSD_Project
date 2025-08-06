@@ -657,7 +657,7 @@ router bgp 65002
 
 ##### VLANs
 
-To configure VLANs within Site 2, we create two separate virtual interfaces bound to the physical eth1 interface. So, the link associated with eth1 will carry traffic for both VLANs. The IP addresses for each VLAN are then assigned to their respective virtual interfaces.
+To configure VLANs within Site 2, two distinct virtual sub-interfaces are created on the physical interface eth1, each corresponding to a specific VLAN. This configuration enables eth1 to serve as a trunk link, carrying tagged traffic for both VLANs. Each virtual sub-interface is then assigned an IP address.
 
 ```bash
 ip link add link eth1 name eth1.32 type vlan id 32
@@ -675,18 +675,25 @@ ip addr add 192.168.95.1/24 dev eth0.95
 
 
 ```bash
-# To reach the core network we define the default gateway and associate a new IP address to the interface toward the edge router.
+# Assign an IP address to the interface 
+# facing the edge router and configure it as the 
+# default gateway to enable upstream connectivity.
 ip addr add 192.168.2.100/24 dev eth0
 ip route add default via 192.168.2.1
 
-# We build a virtual bridge and associate to it the two interfaces facing the client devices within the two VLANs.
+# We create a virtual bridge and attach 
+# to it the two interfaces connected to 
+# client devices in the respective VLANs.
 ip link add bridge type bridge
 ip link set bridge up
 ip link set dev eth1 master bridge
 ip link set dev eth2 master bridge
 ip link set dev bridge type bridge vlan_filtering 1
 
-# Configure the default ACL policies so that bridge related traffic is blocked for forwarding. The switch wont forward packets unless a spcific rule permits it.
+# Configure the default ACL policies to 
+# block bridge-related traffic from being forwarded. 
+# The switch will drop all packets unless explicitly 
+# allowed by a defined rule.
 ebtables -F
 ebtables -P FORWARD DROP
 ebtables -P INPUT ACCEPT
@@ -694,7 +701,13 @@ ebtables -P OUTPUT ACCEPT
 
 # Enable EAPoL forwarding
 echo 8 > /sys/class/net/bridge/bridge/group_fwd_mask
+
+cat hostapd.conf > /etc/hostapd/hostapd.conf
 ```
+
+Authentication requests are received on the virtual bridge interface, which aggregates the two interfaces connected to client devices in separate VLANs. These requests originate from clients within each VLAN.
+
+The switch, acting as the authenticator, forwards the requests to the RADIUS server using its IP address assigned to the eth0 interface, which connects to the edge router. Routing to VPN Site 3, where the RADIUS server resides, is handled by the provider network via the BGP/MPLS backbone.
 
 ###### hostapd.conf
 
@@ -735,11 +748,6 @@ auth_server_addr=192.168.3.101
 auth_server_port=1812
 auth_server_shared_secret=rad1u5_5ecret
 ```
-
-Authentication requests will be handled by the virtual bridge interface to which the two physical interfaces are attached, therefore requests will come from the two client within the two VLANs.
-
-The switch authenticator will send the requests to the server throgh its IP address mapped to the eth0 interface (that faces the edge router toward the provider network). 
-The provider network through the BGP/MPLS backbone will handle routing to reach the VPN Site 3 (that contains the Radius server).
 
 
 ##### eBPF Configuration
@@ -824,7 +832,7 @@ cat users.conf > /etc/freeradius/3.0/users
 service freeradius start
 ```
 
-Set the authenticator device IP address from which the server will receive the authentication requests (i.e. the switch ip address) and the shared secret.
+Set the IP address of the authenticator device (i.e., the switch) from which the RADIUS server will receive authentication requests, and configure the shared secret used to secure the communication between the switch and the server.
 
 ###### clients.conf
 
@@ -837,7 +845,7 @@ client switch {
 
 ```
 
-Set authenticating users information and set the VLANs IDs as attributes within the radius message repsonse in case of a successful authentication.
+Configure the users' authentication details and define the VLAN IDs as attributes in the RADIUS response message, to be returned upon successful authentication.
 
 ###### users.conf
 ```text
