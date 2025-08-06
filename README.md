@@ -7,9 +7,6 @@
 
 ---
 
-
-## Network Configuration
-
 ### AS100: BGP/MPLS VPN Backbone
 
 AS100 is configured as the provider backbone for the customer VPN.
@@ -39,16 +36,12 @@ Most considerations made to R101 also apply to the other border routers (R102 an
 ```text
 interface eth0
  ip address 10.1.1.1/30
-exit
 !
 interface eth1
  ip address 10.0.100.1/30
-exit
 !
 interface lo
  ip address 1.255.0.1/32
-exit
-!
 ```
 
 ##### 1.2 OSPF
@@ -58,15 +51,13 @@ router ospf
  ospf router-id 1.255.0.1
  network 1.255.0.1/32 area 0
  network 10.0.100.0/30 area 0
-exit
-!
 ```
 
 ##### 1.3 VRF
 
 Define the VRF to properly manage the traffic related to the sites of the customer VPN.
 
-```text
+```bash
 ip link add mainVPN type vrf table 10
 ip link set mainVPN up
 ip link set eth0 master mainVPN
@@ -101,8 +92,6 @@ mpls ldp
   interface eth1
   interface lo
  exit
-exit
-!
 ```
 
 ##### 1.6 iBGP Core Peering
@@ -113,25 +102,20 @@ This configuration forms an overlay newtork between border routers to properly m
 ```text
 router bgp 100
  bgp router-id 1.255.0.1
-
+ !
  neighbor 1.255.0.2 remote-as 100
  neighbor 1.255.0.2 update-source 1.255.0.1
  neighbor 1.255.0.3 remote-as 100
  neighbor 1.255.0.3 update-source 1.255.0.1
-
+ !
  address-family ipv4 unicast
   neighbor 1.255.0.2 next-hop-self
   neighbor 1.255.0.3 next-hop-self
- exit
-
  address-family ipv4 vpn
   neighbor 1.255.0.2 activate
   neighbor 1.255.0.2 next-hop-self
   neighbor 1.255.0.3 activate
   neighbor 1.255.0.3 next-hop-self
- exit
-exit
-!
 ```
 
 ##### 1.7 CE-PE Dynamic Routing
@@ -141,9 +125,6 @@ The following configuration allows to route traffic dynamically between the cust
 router bgp 100 vrf mainVPN
  address-family ipv4
   neighbor 10.1.1.2 remote-as 65001
- exit
-exit
-!
 ```
 
 ##### 1.8 RD & RT
@@ -162,9 +143,6 @@ router bgp 100 vrf mainVPN
   rt vpn export 100:2
   export vpn
   import vpn
- exit
-exit
-!
 ```
 
 
@@ -175,16 +153,12 @@ exit
 ```text
 interface eth0
  ip address 10.1.3.1/30
-exit
 !
 interface eth1
  ip address 10.0.100.5/30
-exit
 !
 interface lo
  ip address 1.255.0.2/32
-exit
-!
 ```
 
 ##### 2.2 OSPF
@@ -194,13 +168,11 @@ router ospf
  ospf router-id 1.255.0.2
  network 1.255.0.2/32 area 0
  network 10.0.100.4/30 area 0
-exit
-!
 ```
 
 ##### 2.3 VRF
 
-```text
+```bash
 ip link add mainVPN type vrf table 10
 ip link set mainVPN up
 ip link set eth0 master mainVPN
@@ -233,9 +205,6 @@ mpls ldp
   discovery transport-address 1.255.0.2
   interface eth1
   interface lo
- exit
-exit
-!
 ```
 
 ##### 2.6 iBGP Core Peering
@@ -243,25 +212,20 @@ exit
 ```text
 router bgp 100
  bgp router-id 1.255.0.2
-
+ !
  neighbor 1.255.0.1 remote-as 100
  neighbor 1.255.0.1 update-source 1.255.0.2
  neighbor 1.255.0.3 remote-as 100
  neighbor 1.255.0.3 update-source 1.255.0.2
-
+ !
  address-family ipv4 unicast
   neighbor 1.255.0.1 next-hop-self
   neighbor 1.255.0.3 next-hop-self
- exit
-
  address-family ipv4 vpn
   neighbor 1.255.0.1 activate
   neighbor 1.255.0.1 next-hop-self
   neighbor 1.255.0.3 activate
   neighbor 1.255.0.3 next-hop-self
- exit
-exit
-!
 ```
 
 ##### 2.7 CE-PE Dynamic Routing
@@ -270,9 +234,6 @@ exit
 router bgp 100 vrf mainVPN
  address-family ipv4
   neighbor 10.1.3.2 remote-as 65003
- exit
-exit
-!
 ```
 
 ##### 2.8 Spoke-Spoke Communication
@@ -284,9 +245,6 @@ ip route 0.0.0.0/0 Null0 vrf mainVPN
 router bgp 100 vrf mainVPN
     address-family ipv4 unicast
         network 0.0.0.0/0
-    exit
-exit
-
 ```
 
 ##### 2.9 RD & RT
@@ -302,9 +260,6 @@ router bgp 100 vrf mainVPN
   rt vpn export 100:1
   export vpn
   import vpn
- exit
-exit
-!
 ```
 
 
@@ -315,16 +270,12 @@ exit
 ```text
 interface eth0
  ip address 10.1.2.1/30
-exit
 !
 interface eth1
  ip address 10.0.100.9/30
-exit
 !
 interface lo
  ip address 1.255.0.3/32
-exit
-!
 ```
 
 ##### 3.2 OSPF
@@ -334,13 +285,11 @@ router ospf
  ospf router-id 1.255.0.3
  network 1.255.0.3/32 area 0
  network 10.0.100.8/30 area 0
-exit
-!
 ```
 
 ##### 3.3 VRF
 
-```text
+```bash
 ip link add mainVPN type vrf table 10
 ip link set mainVPN up
 ip link set eth0 master mainVPN
@@ -373,9 +322,6 @@ mpls ldp
   discovery transport-address 1.255.0.3
   interface eth1
   interface lo
- exit
-exit
-!
 ```
 
 ##### 3.6 iBGP Core Peering
@@ -383,25 +329,20 @@ exit
 ```text
 router bgp 100
  bgp router-id 1.255.0.3
-
+ !
  neighbor 1.255.0.1 remote-as 100
  neighbor 1.255.0.1 update-source 1.255.0.3
  neighbor 1.255.0.2 remote-as 100
  neighbor 1.255.0.2 update-source 1.255.0.3
-
+ !
  address-family ipv4 unicast
   neighbor 1.255.0.1 next-hop-self
   neighbor 1.255.0.2 next-hop-self
- exit
-
  address-family ipv4 vpn
   neighbor 1.255.0.1 activate
   neighbor 1.255.0.1 next-hop-self
   neighbor 1.255.0.2 activate
   neighbor 1.255.0.2 next-hop-self
- exit
-exit
-!
 ```
 
 ##### 3.7 CE-PE Dynamic Routing
@@ -410,9 +351,6 @@ exit
 router bgp 100 vrf mainVPN
  address-family ipv4
   neighbor 10.1.2.2 remote-as 65002
- exit
-exit
-!
 ```
 
 ##### 3.8 RD & RT
@@ -426,9 +364,6 @@ router bgp 100 vrf mainVPN
   rt vpn export 100:2
   export vpn
   import vpn
- exit
-exit
-!
 ```
 
 
@@ -441,20 +376,15 @@ R104 does not require iBGP peering configuration, as it operates purely as a cor
 ```text
 interface eth0
  ip address 10.0.100.2/30
-exit
 !
 interface eth1
  ip address 10.0.100.6/30
-exit
 !
 interface eth2
  ip address 10.0.100.10/30
-exit
 !
 interface lo
  ip address 1.255.0.4/32
-exit
-!
 ```
 
 ##### 4.2 OSPF
@@ -466,8 +396,6 @@ router ospf
  network 10.0.100.0/30 area 0
  network 10.0.100.4/30 area 0
  network 10.0.100.8/30 area 0
-exit
-!
 ```
 
 ##### 4.3 MPLS Parameters
@@ -500,14 +428,230 @@ mpls ldp
   interface eth1
   interface eth2
   interface lo
- exit
-exit
+```
+
+---
+
+
+### VPN Site 1
+
+#### CE1 Configuration
+
+##### 1. Interfaces
+
+```text
+interface eth0
+ ip address 10.1.1.2/30
 !
+interface eth1
+ ip address 192.168.1.1/24
+```
+
+##### 2. Dynamic routing
+
+To complete the CE-PE routing configuration between the Site 1 CE and the border router R101, BGP must also be configured on the CE. Specifically, the CE should advertise the local network (192.168.1.0/24) and specify the address of its BGP neighbor (R101). This ensures that the CE can advertise its routes to the corresponding PE router in AS100.
+
+```text
+router bgp 65001
+ network 192.168.1.0/24
+ neighbor 10.1.1.1 remote-as 100
+```
+
+---
+
+
+#### client-A1 Configuration
+
+```bash
+ip addr add 192.168.1.101/24 dev eth0
+ip route add default via 192.168.1.1
 ```
 
 
-#### Testing
+##### AppArmor
 
-* **OSPF adjacencies**: `show ip ospf neighbor`
-* **LDP sessions**: `show mpls ldp neighbor`
-* **BGP VPNv4 routes**: `show bgp ipv4 vpn`
+This setup implements mandatory access control (MAC) rules using AppArmor for three specific use cases:
+
+1. **Restrict `wget` write access to a safe directory**
+   `wget` is commonly used to download files from the web. To mitigate the risk of it writing to unintended locations, we allow it to write only to a designated safe directory.
+
+2. **Deny all networking for `netcat`**
+   `netcat` can be used in insecure contexts, such as creating reverse shells. To prevent potential abuse, we completely block its networking capabilities.
+
+3. **Restrict a custom read/write program to a safe directory**
+   A custom Python program (`rw_file.py`) is capable of reading from and writing to files. We confine it so that it can only access files within a specified safe directory.
+
+All profiles were generated using the `aa-genprof` tool.
+
+###### `wget` Profile
+
+**Location:** `/etc/apparmor.d/usr.bin.wget`
+
+```text
+# Last Modified: Wed Aug  6 14:08:22 2025
+abi <abi/3.0>,
+
+include <tunables/global>
+
+/usr/bin/wget {
+  include <abstractions/base>
+  include <abstractions/nameservice>
+  include <abstractions/ssl_certs>
+
+  /etc/gai.conf r,
+  /etc/host.conf r,
+  /etc/hosts r,
+  /etc/nsswitch.conf r,
+  /etc/wgetrc r,
+  /usr/bin/wget mr,
+  /usr/share/publicsuffix/public_suffix_list.dafsa r,
+  
+  owner /home/client/safe_downloads/** w,
+}
+```
+
+###### `netcat` Profile
+
+**Location:** `/etc/apparmor.d/usr.bin.nc.openbsd`
+
+```text
+# Last Modified: Wed Aug  6 15:05:30 2025
+abi <abi/3.0>,
+
+include <tunables/global>
+
+/usr/bin/nc.openbsd {
+  include <abstractions/apache2-common>
+  include <abstractions/base>
+
+  /etc/nsswitch.conf r,
+  /etc/services r,
+  /usr/bin/nc.openbsd mr,
+
+  deny network,
+}
+```
+
+###### `rw_file.py` Script
+
+**Script Functionality:**
+
+* **Read mode:** Displays file contents (like `cat`).
+* **Write mode:** Accepts a file path, offset and content.
+
+```python
+#!/usr/bin/env python3
+import os
+import sys
+
+def usage():
+    print(f"Usage:")
+    print(f"  {sys.argv[0]} read <file>")
+    print(f"  {sys.argv[0]} write <file> <offset> <content>")
+    sys.exit(1)
+
+def read_file(path):
+    try:
+        with open(path, "rb") as f:
+            sys.stdout.buffer.write(f.read())
+    except FileNotFoundError:
+        print(f"Error: File '{path}' not found.", file=sys.stderr)
+    except PermissionError:
+        print(f"Error: Permission denied for '{path}'.", file=sys.stderr)
+
+def write_file(path, offset, content):
+    try:
+        offset = int(offset)
+        if offset < 0:
+            print("Error: Offset must be non-negative.", file=sys.stderr)
+            return
+        with open(path, "r+b") as f:
+            f.seek(offset)
+            f.write(content.encode())
+    except FileNotFoundError:
+        print(f"Error: File '{path}' not found.", file=sys.stderr)
+    except PermissionError:
+        print(f"Error: Permission denied for '{path}'.", file=sys.stderr)
+    except ValueError:
+        print("Error: Offset must be an integer.", file=sys.stderr)
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        usage()
+    mode = sys.argv[1].lower()
+    file_path = sys.argv[2]
+    if mode == "read":
+        read_file(file_path)
+    elif mode == "write" and len(sys.argv) == 5:
+        write_file(file_path, sys.argv[3], sys.argv[4])
+    else:
+        usage()
+```
+
+###### `rw_file.py` Profile
+
+**Location:** `/etc/apparmor.d/home.client.rw_file.py`
+
+```text
+# Last Modified: Wed Aug  6 17:57:56 2025
+abi <abi/3.0>,
+
+include <tunables/global>
+
+/home/client/rw_file.py {
+  include <abstractions/base>
+  include <abstractions/consoles>
+  include <abstractions/python>
+
+  /etc/ld.so.cache r,
+  /home/client/rw_file.py r,
+  /usr/bin/env ix,
+  /usr/bin/python3.12 mrix,
+  /usr/lib/ r,
+  
+  owner /home/client/safe_dir/** rw,
+
+}
+```
+
+###### Enforcing the Profiles
+
+```bash
+apparmor_parser -r /etc/apparmor.d/usr.bin.wget
+apparmor_parser -r /etc/apparmor.d/usr.bin.nc.openbsd
+apparmor_parser -r /etc/apparmor.d/home.client.rw_file.py
+
+aa-enforce /etc/apparmor.d/usr.bin.wget
+aa-enforce /etc/apparmor.d/usr.bin.nc.openbsd
+aa-enforce /etc/apparmor.d/home.client.rw_file.py
+```
+
+###### Disabling the Profiles
+
+```bash
+aa-disable /etc/apparmor.d/usr.bin.wget
+aa-disable /etc/apparmor.d/usr.bin.nc.openbsd
+aa-disable /etc/apparmor.d/home.client.rw_file.py
+```
+
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
