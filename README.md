@@ -660,13 +660,13 @@ router bgp 65002
 To configure VLANs within Site 2, two distinct virtual sub-interfaces are created on the physical interface eth1, each corresponding to a specific VLAN. This configuration enables eth1 to serve as a trunk link, carrying tagged traffic for both VLANs. Each virtual sub-interface is then assigned an IP address.
 
 ```bash
-ip link add link eth1 name eth1.32 type vlan id 32
-ip link add link eth1 name eth1.95 type vlan id 95
+ip link add link eth0 name eth0.32 type vlan id 32
+ip link add link eth0 name eth0.95 type vlan id 95
 
 ip link set eth0.32 up
 ip link set eth0.95 up
 
-ip addr add 192.168.32.1/24 dev eth1.32
+ip addr add 192.168.32.1/24 dev eth0.32
 ip addr add 192.168.95.1/24 dev eth0.95
 ```
 
@@ -675,39 +675,25 @@ ip addr add 192.168.95.1/24 dev eth0.95
 
 
 ```bash
-# Assign an IP address to the interface 
-# facing the edge router and configure it as the 
-# default gateway to enable upstream connectivity.
-ip addr add 192.168.2.100/24 dev eth0
+# Create a virtual bridge and attach three interfaces:
+# one connected to the router and two connected to client devices in their respective VLANs.
+ip link add br0 type bridge
+ip link set br0 up
+ip link set dev eth0 master br0
+ip link set dev eth1 master br0
+ip link set dev eth2 master br0
+
+# Assign an IP address to the virtual bridge interface.
+# This IP is the one associated to the RADIUS client.
+ip addr add 192.168.2.100/24 dev br0
 ip route add default via 192.168.2.1
-
-# We create a virtual bridge and attach 
-# to it the two interfaces connected to 
-# client devices in the respective VLANs.
-ip link add bridge type bridge
-ip link set bridge up
-ip link set dev eth1 master bridge
-ip link set dev eth2 master bridge
-ip link set dev bridge type bridge vlan_filtering 1
-
-# Configure the default ACL policies to 
-# block bridge-related traffic from being forwarded. 
-# The switch will drop all packets unless explicitly 
-# allowed by a defined rule.
-ebtables -F
-ebtables -P FORWARD DROP
-ebtables -P INPUT ACCEPT
-ebtables -P OUTPUT ACCEPT
-
-# Enable EAPoL forwarding
-echo 8 > /sys/class/net/bridge/bridge/group_fwd_mask
 
 cat hostapd.conf > /etc/hostapd/hostapd.conf
 ```
 
-Authentication requests are received on the virtual bridge interface, which aggregates the two interfaces connected to client devices in separate VLANs. These requests originate from clients within each VLAN.
+Authentication requests are received on the virtual bridge interface, which aggregates the two interfaces connected to the client devices in the separate VLANs. These requests originate from clients within each VLAN.
 
-The switch, acting as the authenticator, forwards the requests to the RADIUS server using its IP address assigned to the eth0 interface, which connects to the edge router. Routing to VPN Site 3, where the RADIUS server resides, is handled by the provider network via the BGP/MPLS backbone.
+The switch, acting as the authenticator, forwards the requests to the RADIUS server (EAPoL forwarding is enabled) using the IP address assigned to the bridge interface (that embeds eth0). Routing to VPN Site 3, where the RADIUS server resides, is handled by the provider network via the BGP/MPLS backbone.
 
 ###### hostapd.conf
 
@@ -735,7 +721,7 @@ ieee8021x=1
 use_pae_group_addr=1
 
 # Network interface for authentication requests
-interface=bridge
+interface=br0
 
 # Local IP address used as NAS-IP-Address
 own_ip_addr=192.168.2.100
@@ -762,6 +748,9 @@ ip addr add 192.168.32.101/24 dev eth0
 ip route add default via 192.168.32.1
 
 cat b1_supplicant.conf > /etc/wpa_supplicant.conf
+
+# start wpa_supplicant in background
+wpa_supplicant -B -c/etc/wpa_supplicant.conf -Dwired -ieth0
 ```
 
 ###### b1_supplicant.conf
@@ -784,6 +773,9 @@ ip addr add 192.168.95.101/24 dev eth0
 ip route add default via 192.168.95.1
 
 cat b2_supplicant.conf > /etc/wpa_supplicant.conf
+
+# start wpa_supplicant in background
+wpa_supplicant -B -c/etc/wpa_supplicant.conf -Dwired -ieth0
 ```
 
 ###### b2_supplicant.conf
@@ -837,7 +829,7 @@ Set the IP address of the authenticator device (i.e., the switch) from which the
 ###### clients.conf
 
 ```text
-client switch {
+client cumulus1 {
     ipaddr = 192.168.2.100
     secret = "rad1u5_5ecret"
     shortname = nsd_project
@@ -861,3 +853,791 @@ client-B2   Cleartext-Password := "pa55w0rd_b2"
             Tunnel-Medium-Type = 6,
             Tunnel-Private-Group-ID = 95
 ```
+
+
+
+---
+
+
+
+# eBPF 802.1X + RADIUS: Build & Deploy (eth0 uplink, eth1/eth2 clients)
+
+This single README has everything you need: directory layout, all source files, and exact build/attach/run steps.
+
+---
+
+## Overview
+
+* **Goal**: enforce VLAN and access on a Linux bridge based on 802.1X (EAPOL) + RADIUS results.
+* **Hooks**:
+
+  * **TC egress** on `eth1`/`eth2`: record the *intended* port for each `EAP-Request(id)`.
+  * **XDP ingress** on `eth1`/`eth2`: only allow `EAP-Response(id)` on that intended port; learn `id → {MAC, ifindex}`.
+  * **XDP ingress** on `eth0`: parse RADIUS replies; extract `EAP-Message(id)` and VLAN; publish `{MAC → {state, vlan, ifindex}}` for the userspace enforcer.
+* **Userspace** (Rust): watches the `auth_map` and applies `bridge vlan` + `ebtables` rules.
+
+Default interfaces: `eth0` (uplink/router/RADIUS), `eth1` & `eth2` (access ports for Client-B1/B2).
+
+---
+
+## Prereqs (Ubuntu/Debian-like)
+
+```bash
+sudo apt-get update
+sudo apt-get install -y clang llvm make iproute2 bpftool ebtables bridge-utils pkg-config \
+                        build-essential git curl
+# Rust toolchain (if not installed)
+curl https://sh.rustup.rs -sSf | sh -s -- -y
+source $HOME/.cargo/env
+
+# eBPF FS + JIT (once per boot)
+sudo mount -t bpf bpf /sys/fs/bpf || true
+sudo sysctl -w net.core.bpf_jit_enable=1
+```
+
+---
+
+## Create project directory
+
+```bash
+mkdir -p ebpf-auth && cd ebpf-auth
+```
+
+---
+
+## Directory layout
+
+```
+ebpf-auth/
+├── Makefile
+├── common_defs.h
+├── tc_eap_req.c        # TC egress on eth1/eth2: record EAP-Request(id) -> port
+├── xdp_eap_ing.c       # XDP ingress on eth1/eth2: gate EAP-Response(id) to that port + learn MAC
+├── xdp_radius.c        # XDP ingress on eth0: parse RADIUS, emit {MAC -> {state,vlan,port}} to auth_map
+└── enforcer/           # Rust userspace VLAN/MAC enforcer
+    ├── Cargo.toml
+    └── src/main.rs
+```
+
+> Create the files below exactly as shown.
+
+---
+
+## Files — eBPF programs & headers
+
+### `Makefile`
+
+```make
+# ---- Interface names (override on the command line if different) -----------
+IF_UPLINK ?= eth0       # RADIUS/uplink
+IF_ACCESS1 ?= eth1      # client 1
+IF_ACCESS2 ?= eth2      # client 2
+
+# ---- Toolchain --------------------------------------------------------------
+CLANG ?= clang
+LLVM_STRIP ?= llvm-strip
+BPFOBJ := tc_eap_req.o xdp_eap_ing.o xdp_radius.o
+
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),x86_64)
+  TARGET_ARCH := x86
+else ifeq ($(UNAME_M),aarch64)
+  TARGET_ARCH := arm64
+else ifeq ($(UNAME_M),armv7l)
+  TARGET_ARCH := arm
+else
+  TARGET_ARCH := x86
+endif
+
+CFLAGS_BPF := -O2 -g -target bpf -D__TARGET_ARCH_$(TARGET_ARCH) -Wall -Werror -I.
+LDFLAGS_BPF :=
+
+.PHONY: all
+all: $(BPFOBJ)
+
+%.o: %.c common_defs.h
+    $(CLANG) $(CFLAGS_BPF) -c $< -o $@
+    -$(LLVM_STRIP) -g $@ 2>/dev/null || true
+
+.PHONY: bpffs
+bpffs:
+    sudo mount -t bpf bpf /sys/fs/bpf || true
+
+.PHONY: clean
+clean:
+    rm -f $(BPFOBJ)
+
+.PHONY: show-maps
+show-maps:
+    sudo bpftool map show | egrep 'expected_id_map|id2mac_map|auth_map' || true
+
+# ---- Attach / Detach TC (EAP Request on egress) ----------------------------
+.PHONY: attach-tc
+attach-tc: tc_eap_req.o
+    sudo tc qdisc add dev $(IF_ACCESS1) clsact 2>/dev/null || true
+    sudo tc filter add dev $(IF_ACCESS1) egress bpf da obj tc_eap_req.o sec tc
+    sudo tc qdisc add dev $(IF_ACCESS2) clsact 2>/dev/null || true
+    sudo tc filter add dev $(IF_ACCESS2) egress bpf da obj tc_eap_req.o sec tc
+
+.PHONY: detach-tc
+detach-tc:
+    - sudo tc qdisc del dev $(IF_ACCESS1) clsact
+    - sudo tc qdisc del dev $(IF_ACCESS2) clsact
+
+# ---- Attach / Detach XDP (EAP Responses on access ports) -------------------
+.PHONY: attach-eap-xdp
+attach-eap-xdp: xdp_eap_ing.o
+    sudo ./xdp_loader -A --dev $(IF_ACCESS1) --filename xdp_eap_ing.o --progname xdp_eap_ing
+    sudo ./xdp_loader -A --dev $(IF_ACCESS2) --filename xdp_eap_ing.o --progname xdp_eap_ing
+
+.PHONY: detach-eap-xdp
+detach-eap-xdp:
+    - sudo ./xdp_loader -D --dev $(IF_ACCESS1) --progname xdp_eap_ing || sudo ip link set dev $(IF_ACCESS1) xdp off
+    - sudo ./xdp_loader -D --dev $(IF_ACCESS2) --progname xdp_eap_ing || sudo ip link set dev $(IF_ACCESS2) xdp off
+
+# ---- Attach / Detach XDP (RADIUS on uplink) --------------------------------
+.PHONY: attach-radius
+attach-radius: xdp_radius.o
+    sudo ./xdp_loader -A --dev $(IF_UPLINK) --filename xdp_radius.o --progname xdp_radius_parse
+
+.PHONY: detach-radius
+detach-radius:
+    - sudo ./xdp_loader -D --dev $(IF_UPLINK) --progname xdp_radius_parse || sudo ip link set dev $(IF_UPLINK) xdp off
+
+# ---- Orchestration ----------------------------------------------------------
+.PHONY: attach-all
+attach-all: bpffs all attach-tc attach-eap-xdp attach-radius show-maps
+
+.PHONY: detach-all
+detach-all: detach-radius detach-eap-xdp detach-tc
+```
+
+### `common_defs.h`
+
+```c
+#pragma once
+#include <linux/types.h>
+
+struct expected_entry {
+    __u32 ifindex;   // access port where the EAP-Request(id) was sent
+    __u64 ts_ns;     // when the request was seen
+};
+
+struct id_mac_entry {
+    __u8  mac[6];    // supplicant MAC that sent a valid Response(id) on that port
+    __u32 ifindex;   // access port
+    __u64 ts_ns;     // when we learned it
+};
+
+struct auth_value {
+    __u16 vlan_id;      // from Tunnel-Private-Group-ID
+    __u8  state;        // 1=Access-Accept (EAP-Success), 0=Reject
+    __u8  applied;      // userspace flips to 1 after enforcing rules
+    __u32 ifindex;      // access port
+    __u64 last_seen_ns; // for housekeeping/telemetry
+};
+```
+
+### `tc_eap_req.c` (TC egress: record intended port per EAP-Request id)
+
+```c
+// SPDX-License-Identifier: GPL-2.0
+#include <linux/bpf.h>
+#include <linux/pkt_cls.h>
+#include <linux/if_ether.h>
+#include <bpf/bpf_helpers.h>
+#include "common_defs.h"
+
+#define ETH_P_EAPOL 0x888E
+#define EAPOL_TYPE_EAP_PACKET 0
+
+struct eapol_hdr { __u8 ver, type; __be16 len; } __attribute__((packed));
+struct eap_hdr   { __u8 code, id;  __be16 len; } __attribute__((packed));
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, __u32);                       // EAP id (low 8 bits)
+    __type(value, struct expected_entry);
+    __uint(max_entries, 256);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);      // /sys/fs/bpf/expected_id_map
+} expected_id_map SEC(".maps");
+
+static __always_inline bool ok(void *p, void *end, __u64 sz) {
+    return (void *)((char*)p + sz) <= end;
+}
+
+SEC("tc")
+int tc_eap_req(struct __sk_buff *skb)
+{
+    void *data = (void *)(long)skb->data;
+    void *end  = (void *)(long)skb->data_end;
+
+    struct ethhdr *eth = data;
+    if (!ok(eth, end, sizeof(*eth))) return TC_ACT_OK;
+    if (eth->h_proto != __bpf_htons(ETH_P_EAPOL)) return TC_ACT_OK;
+
+    struct eapol_hdr *eol = (void *)(eth + 1);
+    if (!ok(eol, end, sizeof(*eol))) return TC_ACT_OK;
+    if (eol->type != EAPOL_TYPE_EAP_PACKET) return TC_ACT_OK;
+
+    struct eap_hdr *eap = (void *)(eol + 1);
+    if (!ok(eap, end, sizeof(*eap))) return TC_ACT_OK;
+    if (eap->code != 1 /* Request */) return TC_ACT_OK;
+
+    __u32 key = eap->id;
+    struct expected_entry val = {
+        .ifindex = (__u32)skb->ifindex,  // egress port
+        .ts_ns   = bpf_ktime_get_ns(),
+    };
+    bpf_map_update_elem(&expected_id_map, &key, &val, BPF_ANY);
+    return TC_ACT_OK;
+}
+
+char _license[] SEC("license") = "GPL";
+```
+
+### `xdp_eap_ing.c` (XDP ingress on eth1/eth2: gate Responses; learn id→MAC)
+
+```c
+// SPDX-License-Identifier: GPL-2.0
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+#include <linux/if_ether.h>
+#include "common_defs.h"
+
+#define ETH_P_EAPOL 0x888E
+#define EAPOL_TYPE_EAP_PACKET 0
+#define TTL_NS (5ULL * 1000000000ULL)
+
+struct eapol_hdr { __u8 ver, type; __be16 len; } __attribute__((packed));
+struct eap_hdr   { __u8 code, id;  __be16 len; } __attribute__((packed));
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, __u32);                       // EAP id
+    __type(value, struct expected_entry);
+    __uint(max_entries, 256);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);      // /sys/fs/bpf/expected_id_map
+} expected_id_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, __u32);                       // EAP id
+    __type(value, struct id_mac_entry);
+    __uint(max_entries, 256);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);      // /sys/fs/bpf/id2mac_map
+} id2mac_map SEC(".maps");
+
+static __always_inline bool ok(void *p, void *end, __u64 sz) {
+    return (void *)((char*)p + sz) <= end;
+}
+
+SEC("xdp")
+int xdp_eap_ing(struct xdp_md *ctx)
+{
+    void *data = (void *)(long)ctx->data;
+    void *end  = (void *)(long)ctx->data_end;
+
+    struct ethhdr *eth = data;
+    if (!ok(eth, end, sizeof(*eth))) return XDP_PASS;
+    if (eth->h_proto != __bpf_htons(ETH_P_EAPOL)) return XDP_PASS;
+
+    struct eapol_hdr *eol = (void *)(eth + 1);
+    if (!ok(eol, end, sizeof(*eol))) return XDP_PASS;
+    if (eol->type != EAPOL_TYPE_EAP_PACKET) return XDP_PASS;
+
+    struct eap_hdr *eap = (void *)(eol + 1);
+    if (!ok(eap, end, sizeof(*eap))) return XDP_PASS;
+
+    if (eap->code != 2 /* Response */) return XDP_PASS;
+
+    __u32 key = eap->id;
+    struct expected_entry *exp = bpf_map_lookup_elem(&expected_id_map, &key);
+    if (!exp) return XDP_DROP;
+
+    __u64 now = bpf_ktime_get_ns();
+    if (now - exp->ts_ns > TTL_NS) return XDP_DROP;
+    if (exp->ifindex != (__u32)ctx->ingress_ifindex) return XDP_DROP;
+
+    // Valid responder on intended port: learn id -> {mac, ifindex}
+    struct id_mac_entry im = { .ifindex = (__u32)ctx->ingress_ifindex, .ts_ns = now };
+    __builtin_memcpy(im.mac, eth->h_source, ETH_ALEN);
+    bpf_map_update_elem(&id2mac_map, &key, &im, BPF_ANY);
+
+    return XDP_PASS;
+}
+
+char _license[] SEC("license") = "GPL";
+```
+
+### `xdp_radius.c` (XDP ingress on eth0: parse RADIUS; emit decisions)
+
+```c
+// SPDX-License-Identifier: GPL-2.0
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/udp.h>
+#include "common_defs.h"
+
+#define RAD_CODE_ACCEPT 2
+#define RAD_CODE_REJECT 3
+#define RAD_HDR_LEN 20
+#define RAD_ATTR_EAP_MESSAGE 79
+#define RAD_ATTR_TUNNEL_PRIVATE_GROUP_ID 81
+
+static __always_inline bool ok(void *p, void *end, __u64 sz) {
+    return (void *)((char*)p + sz) <= end;
+}
+
+struct eap_hdr { __u8 code, id; __be16 len; } __attribute__((packed));
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, __u32);
+    __type(value, struct id_mac_entry);
+    __uint(max_entries, 256);
+    __uint(pinning, LIBBPF_PIN_BY_NAME); // /sys/fs/bpf/id2mac_map
+} id2mac_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, __u32);
+    __type(value, struct expected_entry);
+    __uint(max_entries, 256);
+    __uint(pinning, LIBBPF_PIN_BY_NAME); // /sys/fs/bpf/expected_id_map
+} expected_id_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, __u8[6]);
+    __type(value, struct auth_value);
+    __uint(max_entries, 1024);
+    __uint(pinning, LIBBPF_PIN_BY_NAME); // /sys/fs/bpf/auth_map
+} auth_map SEC(".maps");
+
+static __always_inline int parse_dec_u16(const char *p, const char *end, __u16 *out)
+{
+    __u32 v=0; int seen=0;
+#pragma unroll
+    for (int i=0;i<5;i++) {
+        if (p+i >= end) break;
+        char c = p[i];
+        if (c<'0'||c>'9') break;
+        v = v*10 + (c-'0'); seen=1;
+        if (v>4095) break;
+    }
+    if (!seen) return -1;*out = v; return 0;
+}
+
+SEC("xdp")
+int xdp_radius_parse(struct xdp_md *ctx)
+{
+    void *data = (void *)(long)ctx->data;
+    void *end  = (void *)(long)ctx->data_end;
+
+    // IPv4/UDP
+    struct ethhdr *eth = data;
+    if (!ok(eth, end, sizeof(*eth))) return XDP_PASS;
+
+    if (eth->h_proto != __bpf_htons(ETH_P_IP)) return XDP_PASS;
+
+    struct iphdr *ip = (void *)(eth + 1);
+    if (!ok(ip, end, sizeof(*ip))) return XDP_PASS;
+    int ihl = ip->ihl * 4;
+    if (ihl < (int)sizeof(*ip)) return XDP_PASS;
+
+    struct udphdr *udp = (void *)((char*)ip + ihl);
+    if (!ok(udp, end, sizeof(*udp))) return XDP_PASS;
+    if (ip->protocol != IPPROTO_UDP) return XDP_PASS;
+
+    // RADIUS replies from server: src port 1812
+    if (udp->source != __bpf_htons(1812)) return XDP_PASS;
+
+    unsigned char *r = (void *)(udp + 1);
+    if (r + RAD_HDR_LEN > (unsigned char*)end) return XDP_PASS;
+
+    __u8  code = r[0];
+    __u16 rlen = (__u16)(r[2] << 8 | r[3]);
+    if (rlen < RAD_HDR_LEN) return XDP_PASS;
+
+    unsigned char *ra = r + RAD_HDR_LEN, *rend = r + rlen;
+    if (rend > (unsigned char*)end) return XDP_PASS;
+    if (!(code == RAD_CODE_ACCEPT || code == RAD_CODE_REJECT)) return XDP_PASS;
+
+    __u8 eap_id=0, eap_code=0; int have_id=0;
+    __u16 vlan=0; int have_vlan=0;
+
+#pragma unroll
+    for (int i=0;i<64;i++) {
+        if (ra + 2 > rend) break;
+        __u8 at = ra[0], al = ra[1];
+        if (al < 2) break;
+        unsigned char *aval = ra + 2, *anext = ra + al;
+        if (anext > rend) break;
+
+        if (at == RAD_ATTR_EAP_MESSAGE && al >= 6) {
+            struct eap_hdr *eh = (void *)aval;
+            if ((void *)(eh + 1) <= (void *)anext) {
+                eap_id = eh->id; eap_code = eh->code; have_id = 1;
+            }
+        } else if (at == RAD_ATTR_TUNNEL_PRIVATE_GROUP_ID && al > 2) {
+            __u16 v=0;
+            if (!have_vlan && parse_dec_u16((const char*)aval, (const char*)anext, &v)==0)
+                if (v>=1 && v<=4094) { vlan=v; have_vlan=1; }
+        }
+        ra = anext;
+    }
+    if (!have_id) return XDP_PASS;
+
+    __u32 key = eap_id;
+    struct id_mac_entry *im = bpf_map_lookup_elem(&id2mac_map, &key);
+    if (!im) return XDP_PASS;
+
+    struct auth_value val = {
+        .vlan_id = have_vlan ? vlan : 0,
+        .state   = (code == RAD_CODE_ACCEPT && eap_code == 3 /*EAP-Success*/) ? 1 : 0,
+        .applied = 0,
+        .ifindex = im->ifindex,
+        .last_seen_ns = bpf_ktime_get_ns(),
+    };
+    bpf_map_update_elem(&auth_map, im->mac, &val, BPF_ANY);
+
+    // Cleanup: free the id for reuse
+    bpf_map_delete_elem(&id2mac_map, &key);
+    bpf_map_delete_elem(&expected_id_map, &key);
+
+    return XDP_PASS;
+}
+
+char _license[] SEC("license") = "GPL";
+```
+
+---
+
+## Userspace enforcer (Rust)
+
+Create subdirectory and files:
+
+```bash
+mkdir -p enforcer/src
+```
+
+### `enforcer/Cargo.toml`
+
+```toml
+[package]
+name = "radius_enforcer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya = "0.12"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "1.0"
+nix = "0.29"
+```
+
+### `enforcer/src/main.rs`
+
+```rust
+use anyhow::{bail, Context, Result};
+use aya::maps::HashMap as BpfHashMap;
+use aya::Pod;
+use clap::Parser;
+use nix::unistd::Uid;
+use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
+use std::thread;
+use std::time::Duration;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct AuthValue {
+    vlan_id: u16,
+    state: u8,      // 1=accept, 0=reject
+    applied: u8,    // userspace flips to 1 after enforcement
+    ifindex: u32,   // access port (from EAP logic)
+    last_seen_ns: u64,
+}
+unsafe impl Pod for AuthValue {}
+
+#[derive(Parser, Debug)]
+#[command(name="radius_enforcer")]
+struct Args {
+    #[arg(long, default_value = "br0")]
+    bridge: String,
+
+    /// VLAN→iface mapping, e.g. "32:eth1,95:eth2"
+    #[arg(long, value_parser = parse_vlan_map)]
+    vlan_map: HashMap<u16, String>,
+
+    #[arg(long, default_value = "/sys/fs/bpf/auth_map")]
+    map_path: String,
+
+    #[arg(long, default_value = "1")]
+    default_vlan: u16,
+
+    #[arg(long, default_value_t = false)]
+    verify_fdb: bool,
+
+    #[arg(long, default_value_t = 200)]
+    interval_ms: u64,
+}
+
+fn parse_vlan_map(s: &str) -> std::result::Result<HashMap<u16, String>, String> {
+    let mut m = HashMap::new();
+    if s.trim().is_empty() {
+        return Err("vlan_map cannot be empty".into());
+    }
+    for part in s.split(',') {
+        let (k, v) = part
+            .split_once(':')
+            .ok_or_else(|| format!("invalid vlan_map item: {}", part))?;
+        let vid: u16 = k
+            .parse()
+            .map_err(|_| format!("invalid vlan id in vlan_map item: {}", part))?;
+        if v.is_empty() {
+            return Err(format!("invalid iface in vlan_map item: {}", part));
+        }
+        m.insert(vid, v.to_string());
+    }
+    Ok(m)
+}
+
+fn run(cmd: &str, args: &[&str]) -> Result<()> {
+    let st = Command::new(cmd).args(args).status()
+        .with_context(|| format!("spawn failed: {} {:?}", cmd, args))?;
+    if !st.success() {
+        bail!("command failed: {} {:?}", cmd, args);
+    }
+    Ok(())
+}
+
+fn ensure_bridge_vlan_filtering(bridge: &str) -> Result<()> {
+    run("ip", &["link", "set", "dev", bridge, "type", "bridge", "vlan_filtering", "1"])\
+        .or(Ok(()))
+}
+
+fn ensure_port_pvid(iface: &str, vid: u16) -> Result<()> {
+    let _ = run("bridge", &["vlan", "del", "dev", iface, "vid", &vid.to_string()]);
+    run(
+        "bridge",
+        &[
+            "vlan", "add", "dev", iface, "vid", &vid.to_string(), "pvid", "untagged",
+        ],
+    )
+}
+
+fn remove_port_vid(iface: &str, vid: u16) -> Result<()> {
+    run("bridge", &["vlan", "del", "dev", iface, "vid", &vid.to_string()]).or(Ok(()))
+}
+
+fn ensure_ebtables_base(iface: &str) -> Result<()> {
+    let in_chain = format!("AUTH_{}_IN", iface);
+    let out_chain = format!("AUTH_{}_OUT", iface);
+
+    let _ = run("ebtables", &["-t", "filter", "-N", &in_chain]);
+    let _ = run("ebtables", &["-t", "filter", "-N", &out_chain]);
+    let _ = run("ebtables", &["-t", "filter", "-F", &in_chain]);
+    let _ = run("ebtables", &["-t", "filter", "-F", &out_chain]);
+
+    let _ = run("ebtables", &["-t", "filter", "-D", "FORWARD", "-i", iface, "-j", &in_chain]);
+    run("ebtables", &["-t", "filter", "-I", "FORWARD", "-i", iface, "-j", &in_chain])?;
+
+    let _ = run("ebtables", &["-t", "filter", "-D", "FORWARD", "-o", iface, "-j", &out_chain]);
+    run("ebtables", &["-t", "filter", "-I", "FORWARD", "-o", iface, "-j", &out_chain])?;
+
+    let _ = run("ebtables", &["-t", "filter", "-A", &in_chain, "-j", "DROP"]);
+    let _ = run("ebtables", &["-t", "filter", "-A", &out_chain, "-j", "DROP"]);
+    Ok(())
+}
+
+fn mac_string(mac: &[u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+fn allow_mac_on_iface(mac: &[u8; 6], iface: &str) -> Result<()> {
+    let macs = mac_string(unsafe { &*(mac as *const _ as *const [u8; 6]) });
+    let in_chain = format!("AUTH_{}_IN", iface);
+    let out_chain = format!("AUTH_{}_OUT", iface);
+
+    let _ = run("ebtables", &["-t", "filter", "-D", &in_chain, "-s", &macs, "-j", "ACCEPT"]);
+    run("ebtables", &["-t", "filter", "-I", &in_chain, "-s", &macs, "-j", "ACCEPT"])?;
+
+    let _ = run("ebtables", &["-t", "filter", "-D", &out_chain, "-d", &macs, "-j", "ACCEPT"]);
+    run("ebtables", &["-t", "filter", "-I", &out_chain, "-d", &macs, "-j", "ACCEPT"])?;
+    Ok(())
+}
+
+fn revoke_mac_on_iface(mac: &[u8; 6], iface: &str) -> Result<()> {
+    let macs = mac_string(unsafe { &*(mac as *const _ as *const [u8; 6]) });
+    let in_chain = format!("AUTH_{}_IN", iface);
+    let out_chain = format!("AUTH_{}_OUT", iface);
+
+    let _ = run("ebtables", &["-t", "filter", "-D", &in_chain, "-s", &macs, "-j", "ACCEPT"]);
+    let _ = run("ebtables", &["-t", "filter", "-D", &out_chain, "-d", &macs, "-j", "ACCEPT"]);
+    Ok(())
+}
+
+fn fdb_has_mac_on_iface(bridge: &str, iface: &str, mac: &str) -> bool {
+    if let Ok(out) = Command::new("bridge").args(["fdb", "show", "dev", iface]).output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            return s.lines().any(|l| l.contains(mac));
+        }
+    }
+    if let Ok(out) = Command::new("bridge").args(["fdb", "show", "br", bridge]).output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            return s.lines().any(|l| l.contains(mac) && l.contains(iface));
+        }
+    }
+    false
+}
+
+fn main() -> Result<()> {
+    if !Uid::current().is_root() { bail!("run as root"); }
+    let args = Args::parse();
+
+    ensure_bridge_vlan_filtering(&args.bridge)?;
+
+    if !Path::new(&args.map_path).exists() {
+        bail!("map not found: {}", args.map_path);
+    }
+
+    let mut map: BpfHashMap<[u8; 6], AuthValue> =
+        BpfHashMap::from_pin(args.map_path.as_str()).context("open auth_map")?;
+
+    for (_vid, ifname) in &args.vlan_map {
+        ensure_ebtables_base(ifname)?;
+    }
+
+    loop {
+        for item in map.iter() {
+            let (mac_key, mut val) = match item { Ok(kv) => kv, Err(_) => continue };
+
+            let Some(iface) = args.vlan_map.get(&val.vlan_id) else { continue };
+            let macs = mac_string(&mac_key);
+
+            if val.state == 1 && val.applied == 0 {
+                if args.verify_fdb && !fdb_has_mac_on_iface(&args.bridge, iface, &macs) {
+                    continue;
+                }
+                ensure_port_pvid(iface, val.vlan_id)
+                    .with_context(|| format!("set pvid {} on {}", val.vlan_id, iface))?;
+                allow_mac_on_iface(&mac_key, iface)
+                    .with_context(|| format!("allow {} on {}", &macs, iface))?;
+                val.applied = 1;
+                let _ = map.insert(&mac_key, &val, 0);
+            } else if val.state == 0 && val.applied == 1 {
+                revoke_mac_on_iface(&mac_key, iface)
+                    .with_context(|| format!("revoke {} on {}", &macs, iface))?;
+                if args.default_vlan != val.vlan_id {
+                    let _ = remove_port_vid(iface, val.vlan_id);
+                    let _ = ensure_port_pvid(iface, args.default_vlan);
+                }
+                val.applied = 0;
+                let _ = map.insert(&mac_key, &val, 0);
+            }
+        }
+        thread::sleep(Duration::from_millis(args.interval_ms));
+    }
+}
+```
+
+Build the enforcer:
+
+```bash
+cd enforcer
+cargo build --release
+cd ..
+```
+
+---
+
+## Build eBPF programs
+
+```bash
+make
+```
+
+---
+
+## Attach programs
+
+```bash
+# bpffs + JIT (if not already done)
+sudo mount -t bpf bpf /sys/fs/bpf || true
+sudo sysctl -w net.core.bpf_jit_enable=1
+
+# Attach TC egress on access ports (records EAP-Request(id) -> port)
+make attach-tc IF_ACCESS1=eth1 IF_ACCESS2=eth2
+
+# Attach XDP ingress on access ports (gates Responses; learns id->MAC)
+make attach-eap-xdp IF_ACCESS1=eth1 IF_ACCESS2=eth2
+
+# Attach XDP ingress on uplink (RADIUS parser)
+make attach-radius IF_UPLINK=eth0
+
+# Verify pinned maps
+make show-maps
+```
+
+Expected maps: `expected_id_map`, `id2mac_map`, `auth_map`.
+
+---
+
+## Run the enforcer
+
+Example for your VLAN policy (Client-B1 on eth1 → VLAN 32; Client-B2 on eth2 → VLAN 95):
+
+```bash
+sudo ./enforcer/target/release/radius_enforcer \
+  --bridge bridge \
+  --vlan-map 32:eth1,95:eth2 \
+  --map-path /sys/fs/bpf/auth_map \
+  --default-vlan 1 \
+  --verify-fdb
+```
+
+> Ensure your bridge `bridge` has `eth1` and `eth2` as ports, and the switch provides IP reachability to the RADIUS server (hostapd will talk to it via the gateway).
+
+---
+
+## Detach / Cleanup
+
+```bash
+# Detach BPF programs
+make detach-all IF_UPLINK=eth0 IF_ACCESS1=eth1 IF_ACCESS2=eth2
+
+# Optional: remove pinned maps if left behind (be careful)
+sudo rm -f /sys/fs/bpf/expected_id_map /sys/fs/bpf/id2mac_map /sys/fs/bpf/auth_map
+```
+
+---
+
+## Troubleshooting
+
+* **No maps shown**: Ensure `bpffs` is mounted and programs loaded succeeded (`dmesg | tail`).
+* **EAPOL not flowing**: Verify hostapd is running and 802.1X on the ports. With your EAPOL forwarding, the gate will still only allow the intended port based on the Request(id).
+* **Enforcer does nothing**: Check `/sys/fs/bpf/auth_map` with `bpftool map dump pinned /sys/fs/bpf/auth_map`.
+* **VLAN not applied**: `bridge vlan show dev eth1`/`eth2`; ensure `vlan_filtering 1` on `bridge`.
+
+---
+
+## Why this design is robust
+
+* The *intended* port is defined by the **EAP-Request(id)** (seen on **egress**, TC).
+* Only `EAP-Response(id)` arriving on that exact port (within a short TTL) is permitted (XDP ingress).
+* RADIUS Accept/Reject is correlated deterministically via the `id → {MAC,port}` learned from the valid Response.
+* The userspace enforcer applies per-port VLAN and MAC rules idempotently.
+
+
+
