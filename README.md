@@ -2,7 +2,9 @@
 
 ## Network Topology
 
-### TODO: insert topology image
+<p align="center">
+  <img src="resources/Topology.png" alt="Description">
+</p>
 
 ---
 
@@ -1565,17 +1567,28 @@ To compile the user-space program, Rust was required. Therefore, the `nsdcourse/
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /root/xdp-tutorial/xdp_radius_auth
+cd /root/xdp-tutorial
+./configure && make
+
+# Move to project directory
+cd xdp_radius_auth
+
+# Copy the loader into our directory
+cp ../basic-solutions/xdp_loader.c .
+
+ip link set eth0 xdp off
+ip link set eth1 xdp off
+ip link set eth2 xdp off
 
 # Build kernel objects from source
 make
 
 # Attach EAP capture program to access ports
-./xdp_loader -A --dev eth1 --filename xdp_eap.o --progname xdp_eap_parse
-./xdp_loader -A --dev eth2 --filename xdp_eap.o --progname xdp_eap_parse
+./xdp_loader -A --dev eth1 --filename xdp_eap.o --progname xdp_eap_parse || true
+./xdp_loader -A --dev eth2 --filename xdp_eap.o --progname xdp_eap_parse || true
 
 # Attach RADIUS parser to uplink port
-./xdp_loader -A --dev eth0 --filename xdp_radius.o --progname xdp_radius_parse
+./xdp_loader -A --dev eth0 --filename xdp_radius.o --progname xdp_radius_parse || true
 
 # Launch userspace enforcer (Rust based binary)
 cd xdp_user
