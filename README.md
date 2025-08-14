@@ -1,24 +1,49 @@
 # Network and System Defense Project
 
-
 ## Network Topology
 
 ### TODO: insert topology image
 
 ---
 
+## Network Deployment
+
+Each node is deployed using a `deploy.sh` script located in the container’s `/root` directory (which has been mounted as a docker volume). All configuration files are stored in `/root/config`.
+
 ### AS100: BGP/MPLS VPN Backbone
 
 AS100 is configured as the provider backbone for the customer VPN.
-
 
 #### 1. R101 Configuration
 
 Most considerations made to R101 also apply to the other border routers (R102 and R103).
 
-##### 1.1 Interfaces
+###### `deploy.sh`
 
-```text
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+MPLS_CONF="${MPLS_CONF:-/root/config/R101_mpls.conf}"
+
+# VRF setup
+ip link add mainVPN type vrf table 10
+ip link set mainVPN up
+ip link set eth0 master mainVPN
+
+# Apply MPLS sysctls from provided file
+sysctl -p "$MPLS_CONF"
+
+# Ensure links are up
+ip link set eth0 up
+ip link set eth1 up
+ip link set lo up
+
+# vtysh configuration
+vtysh <<'VTY'
+configure terminal
+!
+! ---- Interfaces
 interface eth0
  ip address 10.1.1.1/30
 !
@@ -27,48 +52,16 @@ interface eth1
 !
 interface lo
  ip address 1.255.0.1/32
-```
-
-##### 1.2 OSPF
-
-```text
+exit
+!
+! ---- OSPF
 router ospf
  ospf router-id 1.255.0.1
  network 1.255.0.1/32 area 0
  network 10.0.100.0/30 area 0
-```
-
-##### 1.3 VRF
-
-Define the VRF to properly manage the traffic related to the sites of the customer VPN.
-
-```bash
-ip link add mainVPN type vrf table 10
-ip link set mainVPN up
-ip link set eth0 master mainVPN
-```
-
-##### 1.4 MPLS Setup
-
-Set the following parameters to the mpls kernel level modules.
-
-`R101_mpls.conf`:
-
-```text
-net.mpls.conf.lo.input = 1
-net.mpls.conf.eth1.input = 1
-net.mpls.conf.mainVPN.input = 1
-net.mpls.platform_labels = 100000
-```
-
-```bash
-sysctl -p R101_mpls.conf
-```
-
-##### 1.5 LDP
-
-This configuration enables label distribution toward the core network via eth1, specifies the loopback interface and the discovery address used at the transport level.
-```text
+exit
+!
+! ---- LDP
 mpls ldp
  router-id 1.255.0.1
  ordered-control
@@ -77,14 +70,9 @@ mpls ldp
   interface eth1
   interface lo
  exit
-```
-
-##### 1.6 iBGP Core Peering
-R101 is a border router, therefore we must configure iBGP to route traffic towards other edge routers to reach the different customer sites.
-
-This configuration forms an overlay newtork between border routers to properly manage routing internally, within AS100. Each border router must know each other.
-
-```text
+exit
+!
+! ---- iBGP core peering (AS 100)
 router bgp 100
  bgp router-id 1.255.0.1
  !
@@ -101,71 +89,37 @@ router bgp 100
   neighbor 1.255.0.2 next-hop-self
   neighbor 1.255.0.3 activate
   neighbor 1.255.0.3 next-hop-self
-```
-
-##### 1.7 CE-PE Dynamic Routing
-
-The following configuration allows to route traffic dynamically between the customer edge and the provider edge, without requiring a less flexible static configuration.
-```text
+ exit
+exit
+!
+! ---- CE-PE dynamic routing
 router bgp 100 vrf mainVPN
  address-family ipv4
   neighbor 10.1.1.2 remote-as 65001
-```
-
-##### 1.8 RD & RT
-This configuration defines:
-
-- A route destinguisher to make potentially overlapping IPv4 addresses from different VPNs unique within the MPLS VPN backbone.
-
-- A route target is configured to enable the Spoke-Hub topology by controlling how VPN routes are imported and exported between sites, ensuring that spokes can communicate only through the hub. Since R101 is the PE for Site 1, it imports routes exported by the hub PE and exports its own routes to the hub. This setup ensures that the hub PE maintains awareness of each spoke’s routing information, while spokes remain isolated from one another and are hub dependent.
-
-```text
+exit
+!
+! ---- RD & RT
 router bgp 100 vrf mainVPN
  address-family ipv4 unicast
+  redistribute static
   label vpn export auto
   rd vpn export 100:0
   rt vpn import 100:1
   rt vpn export 100:2
   export vpn
   import vpn
-```
-
-
-#### 2. R102 Configuration
-
-##### 2.1 Interfaces
-
-```text
-interface eth0
- ip address 10.1.3.1/30
+ exit
+exit
 !
-interface eth1
- ip address 10.0.100.5/30
-!
-interface lo
- ip address 1.255.0.2/32
+end
+write memory
+VTY
+
+echo "Deploy complete."
+
 ```
 
-##### 2.2 OSPF
-
-```text
-router ospf
- ospf router-id 1.255.0.2
- network 1.255.0.2/32 area 0
- network 10.0.100.4/30 area 0
-```
-
-##### 2.3 VRF
-
-```bash
-ip link add mainVPN type vrf table 10
-ip link set mainVPN up
-ip link set eth0 master mainVPN
-```
-
-##### 2.4 MPLS Setup
-
-`R102_mpls.conf`:
+`R101_mpls.conf`:
 
 ```text
 net.mpls.conf.lo.input = 1
@@ -174,15 +128,61 @@ net.mpls.conf.mainVPN.input = 1
 net.mpls.platform_labels = 100000
 ```
 
-Apply:
+R101 is a border router, therefore it has been configured iBGP to route traffic towards other edge routers to reach the different customer sites.
+This configuration forms an overlay newtork between border routers to properly manage routing internally, within AS100. Each border router must know each other. Additionally, the configuration allows to route traffic dynamically between the customer edge and the provider edge, without requiring a less flexible static configuration.
+
+The configuration also defines:
+
+- A route destinguisher to make potentially overlapping IPv4 addresses from different VPNs unique within the MPLS VPN backbone.
+
+- A route target to enable the Spoke-Hub topology by controlling how VPN routes are imported and exported between sites, ensuring that spokes can communicate only through the hub. Since R101 is the PE for Site 1, it imports routes exported by the hub PE and exports its own routes to the hub. This setup ensures that the hub PE maintains awareness of each spoke’s routing information, while spokes remain isolated from one another and are hub dependent.
+
+#### 2. R102 Configuration
+
+###### `deploy.sh`
 
 ```bash
-sysctl -p R102_mpls.conf
-```
+#!/usr/bin/env bash
+set -euo pipefail
 
-##### 2.5 LDP
+MPLS_CONF="${MPLS_CONF:-/root/config/R102_mpls.conf}"
 
-```text
+# VRF
+ip link add mainVPN type vrf table 10
+ip link set mainVPN up
+ip link set eth0 master mainVPN
+
+# MPLS sysctls
+sysctl -p "$MPLS_CONF"
+
+# Ensure links up
+ip link set eth0 up
+ip link set eth1 up
+ip link set lo up
+
+# vtysh configuration
+vtysh <<'VTY'
+configure terminal
+!
+! ---- Interfaces
+interface eth0
+ ip address 10.1.3.1/30
+!
+interface eth1
+ ip address 10.0.100.5/30
+!
+interface lo
+ ip address 1.255.0.2/32
+exit
+!
+! ---- OSPF
+router ospf
+ ospf router-id 1.255.0.2
+ network 1.255.0.2/32 area 0
+ network 10.0.100.4/30 area 0
+exit
+!
+! ---- LDP
 mpls ldp
  router-id 1.255.0.2
  ordered-control
@@ -190,14 +190,12 @@ mpls ldp
   discovery transport-address 1.255.0.2
   interface eth1
   interface lo
-```
-
-##### 2.6 iBGP Core Peering
-
-```text
+ exit
+exit
+!
+! ---- iBGP core (AS 100)
 router bgp 100
  bgp router-id 1.255.0.2
- !
  neighbor 1.255.0.1 remote-as 100
  neighbor 1.255.0.1 update-source 1.255.0.2
  neighbor 1.255.0.3 remote-as 100
@@ -211,32 +209,24 @@ router bgp 100
   neighbor 1.255.0.1 next-hop-self
   neighbor 1.255.0.3 activate
   neighbor 1.255.0.3 next-hop-self
-```
-
-##### 2.7 CE-PE Dynamic Routing
-
-```text
+ exit
+exit
+!
+! ---- CE-PE dynamic routing
 router bgp 100 vrf mainVPN
  address-family ipv4
   neighbor 10.1.3.2 remote-as 65003
-```
-
-##### 2.8 Spoke-Spoke Communication
-This configuration is required to ensure that spokes are reachable through the hub PE. The hub PE exports a default route to the spokes, so when a spoke tries to communicate with the other, its PE does not have a specific route to the destination PE, but it does have the default route pointing to the hub. The hub PE, in turn, holds the necessary routes to all spokes and can forward traffic accordingly.
-
-```text
-! This just ensures that the default route exists in the VRF.
+exit
+!
+! ---- Spoke-to-Spoke Communication
 ip route 0.0.0.0/0 Null0 vrf mainVPN
 router bgp 100 vrf mainVPN
-    address-family ipv4 unicast
-        network 0.0.0.0/0
-```
-
-##### 2.9 RD & RT
-
-In this configuration, the hub PE imports all routes received from the spoke PEs and exports its default route to the spokes.
-
-```text
+ address-family ipv4 unicast
+  network 0.0.0.0/0
+ exit
+exit
+!
+! ---- RD & RT
 router bgp 100 vrf mainVPN
  address-family ipv4 unicast
   label vpn export auto
@@ -245,44 +235,18 @@ router bgp 100 vrf mainVPN
   rt vpn export 100:1
   export vpn
   import vpn
-```
-
-
-#### 3. R103 Configuration
-
-##### 3.1 Interfaces
-
-```text
-interface eth0
- ip address 10.1.2.1/30
+ exit
+exit
 !
-interface eth1
- ip address 10.0.100.9/30
-!
-interface lo
- ip address 1.255.0.3/32
+end
+write memory
+VTY
+
+echo "R102 deploy complete."
+
 ```
 
-##### 3.2 OSPF
-
-```text
-router ospf
- ospf router-id 1.255.0.3
- network 1.255.0.3/32 area 0
- network 10.0.100.8/30 area 0
-```
-
-##### 3.3 VRF
-
-```bash
-ip link add mainVPN type vrf table 10
-ip link set mainVPN up
-ip link set eth0 master mainVPN
-```
-
-##### 3.4 MPLS Setup
-
-`R103_mpls.conf`:
+`R102_mpls.conf`:
 
 ```text
 net.mpls.conf.lo.input = 1
@@ -291,15 +255,56 @@ net.mpls.conf.mainVPN.input = 1
 net.mpls.platform_labels = 100000
 ```
 
-Apply:
+We ensure that spokes are reachable through the hub PE. The hub PE exports a default route to the spokes, so when a spoke tries to communicate with the other, its PE does not have a specific route to the destination PE, but it does have the default route pointing to the hub. The hub PE, in turn, holds the necessary routes to all spokes and can forward traffic accordingly.
+
+In fact, through route targets, the hub PE imports all routes received from the spoke PEs and exports its default route to the spokes.
+
+#### 3. R103 Configuration
+
+###### `deploy.sh`
 
 ```bash
-sysctl -p R103_mpls.conf
-```
+#!/usr/bin/env bash
+set -euo pipefail
 
-##### 3.5 LDP
+MPLS_CONF="${MPLS_CONF:-/root/config/R103_mpls.conf}"
 
-```text
+# VRF
+ip link add mainVPN type vrf table 10
+ip link set mainVPN up
+ip link set eth0 master mainVPN
+
+# MPLS sysctls
+sysctl -p "$MPLS_CONF"
+
+# Ensure links up
+ip link set eth0 up
+ip link set eth1 up
+ip link set lo up
+
+# vtysh configuration
+vtysh <<'VTY'
+configure terminal
+!
+! ---- Interfaces
+interface eth0
+ ip address 10.1.2.1/30
+!
+interface eth1
+ ip address 10.0.100.9/30
+!
+interface lo
+ ip address 1.255.0.3/32
+exit
+!
+! ---- OSPF
+router ospf
+ ospf router-id 1.255.0.3
+ network 1.255.0.3/32 area 0
+ network 10.0.100.8/30 area 0
+exit
+!
+! ---- LDP
 mpls ldp
  router-id 1.255.0.3
  ordered-control
@@ -307,11 +312,10 @@ mpls ldp
   discovery transport-address 1.255.0.3
   interface eth1
   interface lo
-```
-
-##### 3.6 iBGP Core Peering
-
-```text
+ exit
+exit
+!
+! ---- iBGP core (AS 100)
 router bgp 100
  bgp router-id 1.255.0.3
  !
@@ -328,37 +332,69 @@ router bgp 100
   neighbor 1.255.0.1 next-hop-self
   neighbor 1.255.0.2 activate
   neighbor 1.255.0.2 next-hop-self
-```
-
-##### 3.7 CE-PE Dynamic Routing
-
-```text
+ exit
+exit
+!
+! ---- VRF mainVPN (CE-PE)
 router bgp 100 vrf mainVPN
- address-family ipv4
-  neighbor 10.1.2.2 remote-as 65002
-```
-
-##### 3.8 RD & RT
-
-```text
+  address-family ipv4
+    neighbor 10.1.2.2 remote-as 65002
+exit
+!
+! ---- RD & RT
 router bgp 100 vrf mainVPN
  address-family ipv4 unicast
+  redistribute static
   label vpn export auto
   rd vpn export 100:0
   rt vpn import 100:1
   rt vpn export 100:2
   export vpn
   import vpn
+ exit
+exit
+!
+end
+write memory
+VTY
+
+echo "R103 deploy complete."
+
 ```
 
+`R103_mpls.conf`:
+
+```text
+net.mpls.conf.lo.input = 1
+net.mpls.conf.eth1.input = 1
+net.mpls.conf.mainVPN.input = 1
+net.mpls.platform_labels = 100000
+```
 
 #### 4. R104 Configuration
 
 R104 does not require iBGP peering configuration, as it operates purely as a core (P) router. It only needs to participate in OSPF and LDP; MPLS label switching will handle the transit traffic. Routing between provider edges (PEs) traverses R104 using MPLS labels, with no need for local BGP routing and VPN awareness.
 
-##### 4.1 Interfaces
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-```text
+MPLS_CONF="${MPLS_CONF:-/root/config/R104_mpls.conf}"
+
+# MPLS sysctls
+sysctl -p "$MPLS_CONF"
+
+# Ensure links up
+ip link set eth0 up
+ip link set eth1 up
+ip link set eth2 up
+ip link set lo   up
+
+# vtysh configuration
+vtysh <<'VTY'
+configure terminal
+!
+! ---- Interfaces
 interface eth0
  ip address 10.0.100.2/30
 !
@@ -370,20 +406,37 @@ interface eth2
 !
 interface lo
  ip address 1.255.0.4/32
-```
-
-##### 4.2 OSPF
-
-```text
+exit
+!
+! ---- OSPF
 router ospf
  ospf router-id 1.255.0.4
  network 1.255.0.4/32 area 0
  network 10.0.100.0/30 area 0
  network 10.0.100.4/30 area 0
  network 10.0.100.8/30 area 0
-```
+exit
+!
+! ---- LDP
+mpls ldp
+ router-id 1.255.0.4
+ ordered-control
+ address-family ipv4
+  discovery transport-address 1.255.0.4
+  interface eth0
+  interface eth1
+  interface eth2
+  interface lo
+ exit
+exit
+!
+end
+write memory
+VTY
 
-##### 4.3 MPLS Parameters
+echo "R104 deploy complete."
+
+```
 
 `R104_mpls.conf`:
 
@@ -394,62 +447,58 @@ net.mpls.conf.eth1.input = 1
 net.mpls.conf.eth2.input = 1
 net.mpls.platform_labels = 100000
 ```
-Apply:
-
-```bash
-sysctl -p R104_mpls.conf
-```
-
-
-##### 4.4 LDP
-
-```text
-mpls ldp
- router-id 1.255.0.4
- ordered-control
- address-family ipv4
-  discovery transport-address 1.255.0.4
-  interface eth0
-  interface eth1
-  interface eth2
-  interface lo
-```
 
 ---
-
 
 ### VPN Site 1
 
 #### CE1 Configuration
 
-##### 1. Interfaces
+###### `deploy.sh`
 
-```text
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Ensure links are up
+ip link set eth0 up
+ip link set eth1 up
+ip link set lo   up
+
+# vtysh configuration
+vtysh <<'VTY'
+configure terminal
+!
+! ---- Interfaces
 interface eth0
  ip address 10.1.1.2/30
 !
 interface eth1
  ip address 192.168.1.1/24
-```
-
-##### 2. Dynamic routing
-
-To complete the CE-PE routing configuration between the Site 1 CE and the border router R101, BGP must also be configured on the CE. Specifically, the CE should advertise the local network (192.168.1.0/24) and specify the address of its BGP neighbor (R101). This ensures that the CE can advertise its routes to the corresponding PE router in AS100.
-
-```text
+exit
+!
+! ---- BGP (CE1 ↔ PE R101)
 router bgp 65001
  network 192.168.1.0/24
  neighbor 10.1.1.1 remote-as 100
+exit
+!
+end
+write memory
+VTY
+
+echo "CE1 deploy complete."
+
 ```
 
+To complete the CE-PE routing configuration between the Site 1 CE and the border router R101, BGP must also be configured on the CE. Specifically, the CE should advertise the local network (192.168.1.0/24) and specify the address of its BGP neighbor (R101). This ensures that the CE can advertise its routes to the corresponding PE router in AS100.
 
 #### client-A1 Configuration
 
 ```bash
-ip addr add 192.168.1.101/24 dev enp3s0
+ip addr add 192.168.1.101/24 dev enp0s3
 ip route add default via 192.168.1.1
 ```
-
 
 ##### AppArmor
 
@@ -488,7 +537,7 @@ include <tunables/global>
   /etc/wgetrc r,
   /usr/bin/wget mr,
   /usr/share/publicsuffix/public_suffix_list.dafsa r,
-  
+
   owner /home/client/safe_downloads/** w,
 }
 ```
@@ -519,8 +568,8 @@ include <tunables/global>
 
 **Script Functionality:**
 
-* **Read mode:** Displays file contents (like `cat`).
-* **Write mode:** Accepts a file path, offset and content.
+- **Read mode:** Displays file contents (like `cat`).
+- **Write mode:** Accepts a file path, offset and content.
 
 ```python
 #!/usr/bin/env python3
@@ -619,47 +668,81 @@ aa-disable /etc/apparmor.d/home.client.rw_file.py
 
 ---
 
-
 ### VPN Site 2
 
 #### CE2 Configuration
 
-```text
+###### `deploy.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+TRUNK_IF="${TRUNK_IF:-eth1}"
+
+# Ensure links up
+ip link set eth0 up
+ip link set eth1 up
+ip link set lo   up
+
+# vtysh configuration
+vtysh <<'VTY'
+configure terminal
+!
+! ---- Interfaces
 interface eth0
  ip address 10.1.2.2/30
 !
 interface eth1
  ip address 192.168.2.1/24
-```
-
-```text
+exit
+!
+! ---- BGP (CE2 ↔ PE R103)
 router bgp 65002
  network 192.168.2.0/24
  network 192.168.32.0/24
  network 192.168.95.0/24
  neighbor 10.1.2.1 remote-as 100
+exit
+!
+end
+write memory
+VTY
+
+# VLANs
+declare -A VLAN_IPS=(
+  [32]="192.168.32.1/24"
+  [95]="192.168.95.1/24"
+)
+
+for vid in "${!VLAN_IPS[@]}"; do
+  ip link add link "${TRUNK_IF}" name "${TRUNK_IF}.${vid}" type vlan id "${vid}"
+  ip link set "${TRUNK_IF}.${vid}" up
+  ip addr add "${VLAN_IPS[$vid]}" dev "${TRUNK_IF}.${vid}"
+done
+
+echo "CE2 deploy complete."
+
 ```
 
-##### VLANs
+Similarly to the consumer edge of Site 1, we configured dynamic routing via BGP, advertising all the site’s known networks, including the VLAN-associated addresses.
 
-To configure VLANs within Site 2, two distinct virtual sub-interfaces are created on the physical interface eth1, each corresponding to a specific VLAN. This configuration enables eth1 to serve as a trunk link, carrying tagged traffic for both VLANs. Each virtual sub-interface is then assigned an IP address.
-
-```bash
-ip link add link eth0 name eth0.32 type vlan id 32
-ip link add link eth0 name eth0.95 type vlan id 95
-
-ip link set eth0.32 up
-ip link set eth0.95 up
-
-ip addr add 192.168.32.1/24 dev eth0.32
-ip addr add 192.168.95.1/24 dev eth0.95
-```
-
+To configure VLANs, two distinct virtual sub-interfaces are created on the physical interface eth1, each corresponding to a specific VLAN. This configuration enables eth1 to serve as a trunk link, carrying tagged traffic for both VLANs. Each virtual sub-interface is then assigned an IP address.
 
 #### Switch Configuration
 
+###### `deploy.sh`
 
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Ensure links up
+ip link set eth0 up
+ip link set eth1 up
+ip link set eth2 up
+ip link set lo   up
+
 # Create a virtual bridge and attach three interfaces:
 # one connected to the router and two connected to client devices in their respective VLANs.
 ip link add br0 type bridge
@@ -688,17 +771,21 @@ echo 8 > /sys/class/net/br0/bridge/group_fwd_mask
 # Enable vlan on bridge interface
 ip link set dev br0 type bridge vlan_filtering 1
 
-cat hostapd.conf > /etc/hostapd/hostapd.conf
-
-# Start hostapd in background
-hostapd -B /etc/hostapd/hostapd.conf
+cat /root/config/hostapd.conf > /etc/hostapd/hostapd.conf
 ```
 
 Authentication requests are received on the virtual bridge interface, which aggregates the two interfaces connected to the client devices in the separate VLANs. These requests originate from clients within each VLAN.
 
 The switch, acting as the authenticator, forwards the requests to the RADIUS server (EAPoL forwarding is enabled) using the IP address assigned to the bridge interface (that embeds eth0). Routing to VPN Site 3, where the RADIUS server resides, is handled by the provider network via the BGP/MPLS backbone.
 
-###### hostapd.conf
+Now, to run the hostapd deamon to handle the RADIUS communication:
+
+```bash
+# Start hostapd in background
+hostapd -B /etc/hostapd/hostapd.conf
+```
+
+`hostapd.conf`:
 
 ```text
 # Control interface settings
@@ -738,15 +825,13 @@ auth_server_port=1812
 auth_server_shared_secret=rad1u5_5ecret
 ```
 
+#### eBPF Configuration
 
-##### eBPF Configuration
-
-###### System Design
+##### System Design
 
 The system is designed through two core XDP components that work at the kernel level and one in user space. The goal is to record the authentication information of stations and the VLAN assigned by the RADIUS server, and then enforce forwarding and VLAN assignment on the switch.
 
-
-###### `xdp_eap.c` — EAP identity → MAC
+##### `xdp_eap.c` — EAP identity → MAC
 
 This module captures **EAP‑Response/Identity** from supplicants and records the MAC address associated with the identity contained in the EAP Identity response. We need this because RADIUS replies do not carry the supplicant MAC, and to avoid hard‑coded mappings in user space, we maintain a dynamic `identity → MAC` mapping to then correlate RADIUS decisions with the actual device.
 
@@ -754,62 +839,61 @@ It also captures **EAPOL‑Logoff** when a user leaves and deauthenticates. In t
 
 Key points:
 
-* Learns and keeps `identity → { mac, ifindex, ts_ns }`.
-* Continuously refreshed as EAP responses arrive (even though not in our deployment, users may change the underlying MAC address).
-* **TTL policy (10s):** when a new MAC address is found for a given identity, if a previous record exists **within the TTL**, we **keep the old value** to avoid flipping between ports; a new MAC replaces it only **after TTL**.
-* Detects **EAPOL‑Logoff** and flips `state = 0` so userspace can roll back prior enforcement.
-* Map pinned at: `/sys/fs/bpf/identity_map`.
+- Learns and keeps `identity → { mac, ifindex, ts_ns }`.
+- Continuously refreshed as EAP responses arrive (even though not in our deployment, users may change the underlying MAC address).
+- **TTL policy (10s):** when a new MAC address is found for a given identity, if a previous record exists **within the TTL**, we **keep the old value** to avoid flipping between ports; a new MAC replaces it only **after TTL**.
+- Detects **EAPOL‑Logoff** and flips `state = 0` so userspace can roll back prior enforcement.
+- Map pinned at: `/sys/fs/bpf/identity_map`.
 
-
-###### `xdp_radius.c` — RADIUS decisions and VLAN
+##### `xdp_radius.c` — RADIUS decisions and VLAN
 
 This is the core module that parses RADIUS packets and records both the authentication outcome and the VLAN assignment.
 
-* Processes **Access‑Accept** packets.
-* Extracts:
+- Processes **Access‑Accept** packets.
+- Extracts:
 
-  * **User‑Name** (identity) → used to look up the MAC in `identity_map`.
-  * **Tunnel‑Private‑Group‑ID** → VLAN ID assigned by the server.
-* Stores an **auth** entry keyed by **MAC** with:
+  - **User‑Name** (identity) → used to look up the MAC in `identity_map`.
+  - **Tunnel‑Private‑Group‑ID** → VLAN ID assigned by the server.
 
-  * `vlan_id`, `state` (1=auth, 0=deauth), `applied` (flipped by userspace after enforcement), `ifindex`, `last_seen_ns`.
+- Stores an **auth** entry keyed by **MAC** with:
+
+  - `vlan_id`, `state` (1=auth, 0=deauth), `applied` (flipped by userspace after enforcement), `ifindex`, `last_seen_ns`.
 
 This lets userspace retrieve per‑station decisions and enforce forwarding/VLAN accordingly.
 
-* Map pinned at: `/sys/fs/bpf/auth_map`.
+- Map pinned at: `/sys/fs/bpf/auth_map`.
 
-
-###### `xdp_user` — Userspace enforcer (polling)
+##### `xdp_user` — Userspace enforcer (polling)
 
 A simple polling process reads, at regular intervals, the auth map populated by `xdp_radius`. When it finds an entry not yet applied, it enforces the configuration for that station.
 
-* If `applied == 0` for a MAC:
+- If `applied == 0` for a MAC:
 
-  * enable L2 forwarding for the station (e.g., via **ebtables**),
-  * assign the **VLAN** learned from `Tunnel‑Private‑Group‑ID`,
-  * ensure the **trunk** between the switch and the gateway carries that VLAN.
+  - enable L2 forwarding for the station (e.g., via **ebtables**),
+  - assign the **VLAN** learned from `Tunnel‑Private‑Group‑ID`,
+  - ensure the **trunk** between the switch and the gateway carries that VLAN.
 
-* After enforcement, mark `applied = 1` so it is not reprocessed in the next polling cycles.
+- After enforcement, mark `applied = 1` so it is not reprocessed in the next polling cycles.
 
-* If `state == 0` and `applied == 1` for a MAC (e.g., after **EAPOL‑Logoff**):
+- If `state == 0` and `applied == 1` for a MAC (e.g., after **EAPOL‑Logoff**):
 
-  * undo the previous enforcement,
-  * remove the **VLAN** membership for that station,
-  * then mark `applied = 0`.
+  - undo the previous enforcement,
+  - remove the **VLAN** membership for that station,
+  - then mark `applied = 0`.
 
-* Entries are **not deleted** (so other processes might implement monitoring capabilities; timestamps allow future housekeeping if desired).
+- Entries are **not deleted** (so other processes might implement monitoring capabilities; timestamps allow future housekeeping if desired).
 
+##### State model (`state` / `applied`)
 
-###### State model (`state` / `applied`)
+- `state` — kernel-driven auth status:
 
-* `state` — kernel-driven auth status:
+  - `1` = authenticated (from `xdp_radius` on **Access‑Accept**),
+  - `0` = deauth (from `xdp_eap` on **EAPOL‑Logoff**).
 
-  * `1` = authenticated (from `xdp_radius` on **Access‑Accept**),
-  * `0` = deauth (from `xdp_eap` on **EAPOL‑Logoff**).
-* `applied` — userspace bookmark:
+- `applied` — userspace bookmark:
 
-  * `0` = not yet enforced / already rolled back,
-  * `1` = enforcement in place. Only userspace flips this.
+  - `0` = not yet enforced / already rolled back,
+  - `1` = enforcement in place. Only userspace flips this.
 
 **State transitions (per‑MAC):**
 
@@ -819,8 +903,7 @@ A simple polling process reads, at regular intervals, the auth map populated by 
 | `state=1, applied=1` | —                     | No change (keep enforced)   | —           |
 | `state=0, applied=1` | kernel (`xdp_eap`)    | Rollback (undo enforcement) | `applied=0` |
 
-
-###### `xdp_eap.c`
+##### `xdp_eap.c`
 
 ```c
 // SPDX-License-Identifier: GPL-2.0
@@ -843,105 +926,104 @@ A simple polling process reads, at regular intervals, the auth map populated by 
 #define TTL_NS (10ULL * 1000000000ULL) /* identity claim valid for 10s */
 
 struct eapol_hdr {
-    __u8 ver, type;
-    __be16 len;
+	__u8 ver, type;
+	__be16 len;
 } __attribute__((packed));
 
 struct eap_hdr {
-    __u8 code, id;
-    __be16 len;
+	__u8 code, id;
+	__be16 len;
 } __attribute__((packed));
 
 struct eap_id_t {
-    __u8 type; /* 1 = Identity */
+	__u8 type; /* 1 = Identity */
 } __attribute__((packed));
 
 SEC("xdp")
 int xdp_eap_parse(struct xdp_md *ctx)
 {
-    void *data = (void *)(long)ctx->data;
-    void *end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
+	void *end = (void *)(long)ctx->data_end;
 
-    struct ethhdr *eth = data;
-    if (!ok(eth, end, sizeof(*eth)))
-        return XDP_PASS;
+	struct ethhdr *eth = data;
+	if (!ok(eth, end, sizeof(*eth)))
+		return XDP_PASS;
 
-    if (eth->h_proto != bpf_htons(ETH_P_EAPOL))
-        return XDP_PASS;
+	if (eth->h_proto != bpf_htons(ETH_P_EAPOL))
+		return XDP_PASS;
 
-    struct eapol_hdr *eol = (void *)(eth + 1);
-    if (!ok(eol, end, sizeof(*eol)))
-        return XDP_PASS;
+	struct eapol_hdr *eol = (void *)(eth + 1);
+	if (!ok(eol, end, sizeof(*eol)))
+		return XDP_PASS;
 
-    if (eol->type == EAPOL_TYPE_LOGOFF) {
-        // signal access revoke
-        struct auth_value *av =
-            bpf_map_lookup_elem(&auth_map, eth->h_source);
-        if (av) {
-            av->state = 0;
-            av->last_seen_ns = bpf_ktime_get_ns();
-        }
+	if (eol->type == EAPOL_TYPE_LOGOFF) {
+		// signal access revoke
+		struct auth_value *av =
+		    bpf_map_lookup_elem(&auth_map, eth->h_source);
+		if (av) {
+			av->state = 0;
+			av->last_seen_ns = bpf_ktime_get_ns();
+		}
 
-        return XDP_PASS;
-    }
+		return XDP_PASS;
+	}
 
-    if (eol->type != EAPOL_TYPE_EAP_PACKET)
-        return XDP_PASS;
+	if (eol->type != EAPOL_TYPE_EAP_PACKET)
+		return XDP_PASS;
 
-    struct eap_hdr *eap = (void *)(eol + 1);
-    if (!ok(eap, end, sizeof(*eap)))
-        return XDP_PASS;
+	struct eap_hdr *eap = (void *)(eol + 1);
+	if (!ok(eap, end, sizeof(*eap)))
+		return XDP_PASS;
 
-    if (eap->code != EAP_RES_CODE)
-        return XDP_PASS;
+	if (eap->code != EAP_RES_CODE)
+		return XDP_PASS;
 
-    struct eap_id_t *eid = (void *)(eap + 1);
-    if (!ok(eid, end, sizeof(*eid)))
-        return XDP_PASS;
+	struct eap_id_t *eid = (void *)(eap + 1);
+	if (!ok(eid, end, sizeof(*eid)))
+		return XDP_PASS;
 
-    if (eid->type != IDENTITY_CODE)
-        return XDP_PASS;
+	if (eid->type != IDENTITY_CODE)
+		return XDP_PASS;
 
-    __u16 eap_len = bpf_ntohs(eap->len);
-    int id_len = (int)eap_len - (int)sizeof(*eap) - 1;
-    if (id_len <= 0)
-        return XDP_PASS;
+	__u16 eap_len = bpf_ntohs(eap->len);
+	int id_len = (int)eap_len - (int)sizeof(*eap) - 1;
+	if (id_len <= 0)
+		return XDP_PASS;
 
-    // extract the user identity
-    unsigned char *id_ptr = (unsigned char *)(eid + 1);
-    // bound the maximum string length
-    id_len = id_len >= ID_MAX ? ID_MAX - 1 : id_len;
+	// extract the user identity
+	unsigned char *id_ptr = (unsigned char *)(eid + 1);
+	// bound the maximum string length
+	id_len = id_len >= ID_MAX ? ID_MAX - 1 : id_len;
 
-    struct identity_key key = {};
-    // copies `len` bytes; including the null terminating
-    // character (+1 is for '\0')
-    bpf_core_read_str(key.id, id_len + 1, id_ptr);
-    __u64 now = bpf_ktime_get_ns();
+	struct identity_key key = {};
+	// copies `len` bytes; including the null terminating
+	// character (+1 is for '\0')
+	bpf_core_read_str(key.id, id_len + 1, id_ptr);
+	__u64 now = bpf_ktime_get_ns();
 
-    // check whether the identity is already mapped to a mac
-    struct identity_val *old_id = bpf_map_lookup_elem(&identity_map, &key);
-    if (old_id) {
-        // keep first claimant for TTL to avoid flipping between ports
-        if (now - old_id->ts_ns < TTL_NS)
-            return XDP_PASS;
-    }
+	// check whether the identity is already mapped to a mac
+	struct identity_val *old_id = bpf_map_lookup_elem(&identity_map, &key);
+	if (old_id) {
+		// keep first claimant for TTL to avoid flipping between ports
+		if (now - old_id->ts_ns < TTL_NS)
+			return XDP_PASS;
+	}
 
-    struct identity_val val = {};
-    val.ifindex = (__u32)ctx->ingress_ifindex;
-    val.ts_ns = now;
-    maccpy(val.mac, eth->h_source);
+	struct identity_val val = {};
+	val.ifindex = (__u32)ctx->ingress_ifindex;
+	val.ts_ns = now;
+	maccpy(val.mac, eth->h_source);
 
-    bpf_map_update_elem(&identity_map, &key, &val, BPF_ANY);
+	bpf_map_update_elem(&identity_map, &key, &val, BPF_ANY);
 
-    return XDP_PASS;
+	return XDP_PASS;
 }
 
 char _license[] SEC("license") = "GPL";
 
 ```
 
-
-###### `xdp_radius.c`
+##### `xdp_radius.c`
 
 ```c
 // SPDX-License-Identifier: GPL-2.0
@@ -959,7 +1041,6 @@ char _license[] SEC("license") = "GPL";
 #include "xdp_common.h"
 
 #define CODE_ACCESS_ACCEPT 2
-#define CODE_ACCESS_REJECT 3
 #define HDR_LEN 20
 #define ATTR_USER_NAME 1
 #define ATTR_TUNNEL_PGID 81
@@ -969,165 +1050,164 @@ char _license[] SEC("license") = "GPL";
 #define TTL_NS (15ULL * 1000000000ULL)
 
 struct radius_hdr {
-    __u8 code;
-    __u8 id;
-    __u16 len;
-    __u8 auth[16];
+	__u8 code;
+	__u8 id;
+	__u16 len;
+	__u8 auth[16];
 } __attribute__((packed));
 
 struct radius_attr_t {
-    __u8 type;
-    __u8 len;
+	__u8 type;
+	__u8 len;
 } __attribute__((packed));
 
 static __always_inline struct udphdr *get_udp(void *data, void *end)
 {
-    struct ethhdr *eth = data;
-    if (!ok(eth, end, sizeof(*eth)))
-        return NULL;
+	struct ethhdr *eth = data;
+	if (!ok(eth, end, sizeof(*eth)))
+		return NULL;
 
-    if (eth->h_proto != bpf_htons(ETH_P_IP))
-        return NULL;
+	if (eth->h_proto != bpf_htons(ETH_P_IP))
+		return NULL;
 
-    struct iphdr *ip = (void *)(eth + 1);
-    if (!ok(ip, end, sizeof(*ip)))
-        return NULL;
+	struct iphdr *ip = (void *)(eth + 1);
+	if (!ok(ip, end, sizeof(*ip)))
+		return NULL;
 
-    if (ip->protocol != IPPROTO_UDP)
-        return NULL;
+	if (ip->protocol != IPPROTO_UDP)
+		return NULL;
 
-    int ihl = ip->ihl * 4;
-    if (ihl < sizeof(*ip) || ihl > 60)
-        return NULL;
+	int ihl = ip->ihl * 4;
+	if (ihl < sizeof(*ip) || ihl > 60)
+		return NULL;
 
-    struct udphdr *udp = (void *)((char *)ip + ihl);
-    if (!ok(udp, end, sizeof(*udp)))
-        return NULL;
+	struct udphdr *udp = (void *)((char *)ip + ihl);
+	if (!ok(udp, end, sizeof(*udp)))
+		return NULL;
 
-    return udp;
+	return udp;
 }
 
 /* Parse decimal VLAN (1..4094) */
 static __always_inline bool parse_vlan(const char *src, const char *end,
-                       __u16 *out)
+				       __u16 *out)
 {
-    __u32 v = 0;
-    bool seen = false;
-    for (int i = 0; i < 5; i++) {
-        if (!ok(src + i, end, 1))
-            break;
+	__u32 v = 0;
+	bool seen = false;
+	for (int i = 0; i < 5; i++) {
+		if (!ok(src + i, end, 1))
+			break;
 
-        char c = src[i];
-        if (c < '0' || c > '9')
-            break;
-        // accumulate digit
-        v = v * 10 + (c - '0');
-        seen = true;
-        if (v > 4094)
-            break;
-    }
-    if (!seen || v < 1 || v > 4094)
-        return false;
+		char c = src[i];
+		if (c < '0' || c > '9')
+			break;
+		// accumulate digit
+		v = v * 10 + (c - '0');
+		seen = true;
+		if (v > 4094)
+			break;
+	}
+	if (!seen || v < 1 || v > 4094)
+		return false;
 
-    *out = (__u16)v;
+	*out = (__u16)v;
 
-    return true;
+	return true;
 }
 
 SEC("xdp")
 int xdp_radius_parse(struct xdp_md *ctx)
 {
-    void *data = (void *)(long)ctx->data;
-    void *end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
+	void *end = (void *)(long)ctx->data_end;
 
-    struct udphdr *udp = get_udp(data, end);
-    if (!udp)
-        return XDP_PASS;
+	struct udphdr *udp = get_udp(data, end);
+	if (!udp)
+		return XDP_PASS;
 
-    if (udp->source != bpf_htons(UDP_PORT))
-        return XDP_PASS;
+	if (udp->source != bpf_htons(UDP_PORT))
+		return XDP_PASS;
 
-    // extract the RADIUS header
-    struct radius_hdr *radius = (void *)(udp + 1);
-    if (!ok(radius, end, sizeof(*radius)))
-        return XDP_PASS;
+	// extract the RADIUS header
+	struct radius_hdr *radius = (void *)(udp + 1);
+	if (!ok(radius, end, sizeof(*radius)))
+		return XDP_PASS;
 
-    __u8 code = radius->code;
+	__u8 code = radius->code;
 
-    if (!(code == CODE_ACCESS_ACCEPT || code == CODE_ACCESS_REJECT))
-        return XDP_PASS;
+	if (!(code == CODE_ACCESS_ACCEPT))
+		return XDP_PASS;
 
-    // identity associated to the user-name attribute
-    struct identity_key key = {};
-    int uname_len = 0;
+	// identity associated to the user-name attribute
+	struct identity_key key = {};
+	int uname_len = 0;
 
-    // vlan attribute
-    __u16 vlan = 0;
+	// vlan attribute
+	__u16 vlan = 0;
 
-    struct radius_attr_t *curr_attr = (void *)(radius + 1);
-    for (int i = 0; i < MAX_ATTRIBUTES; i++) {
-        if (!ok(curr_attr, end, sizeof(*curr_attr)))
-            break;
+	struct radius_attr_t *curr_attr = (void *)(radius + 1);
+	for (int i = 0; i < MAX_ATTRIBUTES; i++) {
+		if (!ok(curr_attr, end, sizeof(*curr_attr)))
+			break;
 
-        __u8 at = curr_attr->type;
-        __u8 al = curr_attr->len - (int)sizeof(*curr_attr);
+		__u8 at = curr_attr->type;
+		__u8 al = curr_attr->len - (int)sizeof(*curr_attr);
 
-        char *av = (void *)(curr_attr + 1);
+		char *av = (void *)(curr_attr + 1);
 
-        if (at == ATTR_USER_NAME) {
-            // bound the user-name length
-            uname_len = al >= ID_MAX ? ID_MAX - 1 : al;
-            // copies `len` bytes; including the null terminating
-            // character (+1 is for '\0')
-            bpf_core_read_str(key.id, uname_len + 1, av);
-        } else if (at == ATTR_TUNNEL_PGID) {
-            if (!parse_vlan(av, end, &vlan))
-                break;
-        }
+		if (at == ATTR_USER_NAME) {
+			// bound the user-name length
+			uname_len = al >= ID_MAX ? ID_MAX - 1 : al;
+			// copies `len` bytes; including the null terminating
+			// character (+1 is for '\0')
+			bpf_core_read_str(key.id, uname_len + 1, av);
+		} else if (at == ATTR_TUNNEL_PGID) {
+			if (!parse_vlan(av, end, &vlan))
+				break;
+		}
 
-        if (uname_len && vlan)
-            // both attributes found, we can exit
-            break;
+		if (uname_len && vlan)
+			// both attributes found, we can exit
+			break;
 
-        curr_attr =
-            (void *)((char *)curr_attr + al + (int)sizeof(*curr_attr));
-    }
+		curr_attr =
+		    (void *)((char *)curr_attr + al + (int)sizeof(*curr_attr));
+	}
 
-    // check if both user-name and vlan are present
-    if (!uname_len || !vlan)
-        return XDP_PASS;
+	// check if both user-name and vlan are present
+	if (!uname_len || !vlan)
+		return XDP_PASS;
 
-    // lookup for the mac associated with the user-name
-    struct identity_val *iv = bpf_map_lookup_elem(&identity_map, &key);
-    if (!iv)
-        return XDP_PASS;
+	// lookup for the mac associated with the user-name
+	struct identity_val *iv = bpf_map_lookup_elem(&identity_map, &key);
+	if (!iv)
+		return XDP_PASS;
 
-    __u64 now = bpf_ktime_get_ns();
-    if (now - iv->ts_ns > TTL_NS) {
-        // stale mapping; ignore
-        return XDP_PASS;
-    }
+	__u64 now = bpf_ktime_get_ns();
+	if (now - iv->ts_ns > TTL_NS) {
+		// stale mapping; ignore
+		return XDP_PASS;
+	}
 
-    // set the authentication value for the mac of the user
-    struct auth_value val = {};
-    val.vlan_id = vlan;
-    val.state = (code == CODE_ACCESS_ACCEPT) ? 1 : 0;
-    val.applied = 0;
-    val.ifindex = iv->ifindex;
-    val.last_seen_ns = now;
+	// set the authentication value for the mac of the user
+	struct auth_value val = {};
+	val.vlan_id = vlan;
+	val.state = 1; // The packet is ACCESS-ACCEPT
+	val.applied = 0;
+	val.ifindex = iv->ifindex;
+	val.last_seen_ns = now;
 
-    bpf_map_update_elem(&auth_map, iv->mac, &val, BPF_ANY);
+	bpf_map_update_elem(&auth_map, iv->mac, &val, BPF_ANY);
 
-    // cleanup: free identity after use
-    bpf_map_delete_elem(&identity_map, &key);
+	// cleanup: free identity after use
+	bpf_map_delete_elem(&identity_map, &key);
 
-    return XDP_PASS;
+	return XDP_PASS;
 }
 
 char _license[] SEC("license") = "GPL";
 
 ```
-
 
 ###### `xdp_common.c`
 
@@ -1138,70 +1218,68 @@ char _license[] SEC("license") = "GPL";
 
 /* Decision stored by xdp_radius for the userspace enforcer */
 struct auth_value {
-    __u16 vlan_id;      /* VLAN from Tunnel-Private-Group-ID  */
-    __u8 state;     /* 1 = Access-Accept, 0 = Reject */
-    __u8 applied;       /* userspace flips to 1 after enforcement */
-    __u32 ifindex;      /* access port for this station */
-    __u64 last_seen_ns; /* for housekeeping */
+	__u16 vlan_id;	    /* VLAN from Tunnel-Private-Group-ID  */
+	__u8 state;	    /* 1 = Auth, 0 = Deauth */
+	__u8 applied;	    /* userspace flips to 1 after enforcement */
+	__u32 ifindex;	    /* access port for this station */
+	__u64 last_seen_ns; /* for housekeeping */
 };
 
 /* Supplicant Identity key */
 #define ID_MAX 64
 struct identity_key {
-    char id[ID_MAX];
+	char id[ID_MAX];
 };
 
 /* Value for identity map: who presented this identity recently */
 struct identity_val {
-    __u8 mac[6];
-    __u32 ifindex;
-    __u64 ts_ns;
+	__u8 mac[6];
+	__u32 ifindex;
+	__u64 ts_ns;
 };
 
 /* identity -> {mac, ifindex, ts} */
 struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __type(key, struct identity_key);
-    __type(value, struct identity_val);
-    __uint(max_entries, 1024);
-    __uint(pinning, LIBBPF_PIN_BY_NAME); /* /sys/fs/bpf/identity_map */
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__type(key, struct identity_key);
+	__type(value, struct identity_val);
+	__uint(max_entries, 1024);
+	__uint(pinning, LIBBPF_PIN_BY_NAME); /* /sys/fs/bpf/identity_map */
 } identity_map SEC(".maps");
 
 /* mac -> {vlan, state, applied, ifindex, ts} (used here only to flip state on
  * Logoff) */
 struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __type(key, __u8[6]);
-    __type(value, struct auth_value);
-    __uint(max_entries, 1024);
-    __uint(pinning, LIBBPF_PIN_BY_NAME); /* /sys/fs/bpf/auth_map */
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__type(key, __u8[6]);
+	__type(value, struct auth_value);
+	__uint(max_entries, 1024);
+	__uint(pinning, LIBBPF_PIN_BY_NAME); /* /sys/fs/bpf/auth_map */
 } auth_map SEC(".maps");
 
 /* Bounds check helper */
 static __always_inline bool ok(const void *p, const void *end, __u64 sz)
 {
-    return (const void *)((const char *)p + sz) <= end;
+	return (const void *)((const char *)p + sz) <= end;
 }
 
 static __always_inline void maccpy(__u8 *dst, const __u8 *src)
 {
-    for (int i = 0; i < ETH_ALEN; i++) {
-        dst[i] = src[i];
-    }
+	for (int i = 0; i < ETH_ALEN; i++) {
+		dst[i] = src[i];
+	}
 }
 
 ```
 
-
 ###### `xdp_user/src/main.rs` (Implemented in Rust)
 
-
 ```rust
-use anyhow::{Context, Result, bail};
-use aya::Pod;
+use anyhow::{bail, Context, Result};
 use aya::maps::{HashMap as BpfHashMap, Map, MapData};
+use aya::Pod;
 use clap::Parser;
-use log::{LevelFilter, debug, info, warn};
+use log::{debug, info, warn, LevelFilter};
 use nix::unistd::Uid;
 use std::collections::HashMap;
 use std::path::Path;
@@ -1213,8 +1291,8 @@ use std::time::Duration;
 #[derive(Copy, Clone, Debug)]
 struct AuthValue {
     vlan_id: u16,
-    state: u8,    // 1=accept, 0=reject
-    applied: u8,  // userspace flips to 1 after enforcement
+    state: u8,    // 1=auth, 0=deauth
+    applied: u8,  // userspace flips this
     ifindex: u32, // access port (from EAP/identity logic)
     last_seen_ns: u64,
 }
@@ -1308,15 +1386,6 @@ fn ensure_bridge_vlan_filtering(bridge: &str) -> Result<()> {
 fn enable_vlan(iface: &str, gateway_iface: &str, vid: u16) -> Result<()> {
     // Remove existing vid (best-effort), then add as PVID untagged
     debug!("set PVID {} (untagged) on {}", vid, iface);
-    let _ = run(
-        "bridge",
-        &["vlan", "del", "dev", iface, "vid", &vid.to_string()],
-    );
-    let _ = run(
-        "bridge",
-        &["vlan", "del", "dev", gateway_iface, "vid", &vid.to_string()],
-    );
-
     run(
         "bridge",
         &[
@@ -1332,27 +1401,17 @@ fn enable_vlan(iface: &str, gateway_iface: &str, vid: u16) -> Result<()> {
     )?;
     run(
         "bridge",
-        &[
-            "vlan",
-            "add",
-            "dev",
-            gateway_iface,
-            "vid",
-            &vid.to_string(),
-        ],
+        &["vlan", "add", "dev", gateway_iface, "vid", &vid.to_string()],
     )
 }
 
 fn disable_vlan(iface: &str, gateway_iface: &str, vid: u16) -> Result<()> {
     debug!("remove VID {} on {}", vid, iface);
-    let _ = run(
-        "bridge",
-        &["vlan", "del", "dev", iface, "vid", &vid.to_string()],
-    );
     run(
         "bridge",
         &["vlan", "del", "dev", gateway_iface, "vid", &vid.to_string()],
-    ).or(Ok(()))
+    )
+    .or(Ok(()))
 }
 
 fn mac_string(mac: &[u8; 6]) -> String {
@@ -1367,20 +1426,12 @@ fn allow_mac_on_iface(mac: &[u8; 6], iface: &str) -> Result<()> {
     info!("allow MAC {} on {}", macs, iface);
 
     // Ingress rule
-    let _ = run(
-        "ebtables",
-        &["-D", "FORWARD", "-i", iface, "-s", &macs, "-j", "ACCEPT"],
-    );
     run(
         "ebtables",
         &["-A", "FORWARD", "-i", iface, "-s", &macs, "-j", "ACCEPT"],
     )?;
 
     // Egress rule
-    let _ = run(
-        "ebtables",
-        &["-D", "FORWARD", "-o", iface, "-d", &macs, "-j", "ACCEPT"],
-    );
     run(
         "ebtables",
         &["-A", "FORWARD", "-o", iface, "-d", &macs, "-j", "ACCEPT"],
@@ -1420,11 +1471,7 @@ fn main() -> Result<()> {
 
     info!(
         "xdp_user start: bridge={}, gateway_iface={}, map_path={}, interval={}ms, vlan_map={:?}",
-        args.bridge,
-        args.gateway_iface,
-        args.map_path,
-        args.interval_ms,
-        args.vlan_map
+        args.bridge, args.gateway_iface, args.map_path, args.interval_ms, args.vlan_map
     );
 
     // VLAN filtering on bridge
@@ -1466,17 +1513,23 @@ fn main() -> Result<()> {
 
             if val.state == 1 && val.applied == 0 {
                 info!("ACCEPT {} vlan {} -> {}", macs, val.vlan_id, iface);
+
                 enable_vlan(iface, &args.gateway_iface, val.vlan_id)
                     .with_context(|| format!("set pvid {} on {}", val.vlan_id, iface))?;
+
                 allow_mac_on_iface(&mac_key, iface)
                     .with_context(|| format!("allow {} on {}", &macs, iface))?;
+
                 val.applied = 1;
                 to_update.push((mac_key, val));
             } else if val.state == 0 && val.applied == 1 {
                 info!("REVOKE {} vlan {} -> {}", macs, val.vlan_id, iface);
+
                 revoke_mac_on_iface(&mac_key, iface)
                     .with_context(|| format!("revoke {} on {}", &macs, iface))?;
+
                 let _ = disable_vlan(iface, &args.gateway_iface, val.vlan_id);
+
                 val.applied = 0;
                 to_update.push((mac_key, val));
             } else {
@@ -1500,12 +1553,18 @@ fn main() -> Result<()> {
 
 ```
 
-**NOTE**: To avoid enlarging the document we are not including the Makefile and the xdp_loader binary, as well as the Cargo.toml file for building the rust user space application.
-
+**NOTE**: To avoid enlarging the document we are not including the Makefile, the xdp_loader binary and the Cargo.toml file for building the Rust user space application.
 
 ###### Build and Deploy
 
+To compile the user-space program, Rust was required. Therefore, the `nsdcourse/ebpf:latest` container was extended to include Rust, the XDP project pre-installed in `/root/xdp-tutorial`, and the Rust user-space application already compiled. The resulting container is available at `0xmenna01/ebpf-rust:latest`.
+
+`load_xdp_radius.sh`:
+
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
 cd /root/xdp-tutorial/xdp_radius_auth
 
 # Build kernel objects from source
@@ -1518,7 +1577,7 @@ make
 # Attach RADIUS parser to uplink port
 ./xdp_loader -A --dev eth0 --filename xdp_radius.o --progname xdp_radius_parse
 
-# Launch userspace enforcer (Rust binary)
+# Launch userspace enforcer (Rust based binary)
 cd xdp_user
 ./target/release/xdp_user \
   --bridge br0 \
@@ -1527,22 +1586,35 @@ cd xdp_user
   --gateway-iface eth0 \
   --interval-ms 1000 \
   --log-level info
-```
 
+```
 
 #### client-B1 Configuration
 
+###### `deploy.sh`
+
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SUPPLICANT_CONF="${SUPPLICANT_CONF:-/root/config/b1_supplicant.conf}"
+
+# Link up
+ip link set eth0 up
+
+# Addressing & route
 ip addr add 192.168.32.101/24 dev eth0
-ip route add default via 192.168.32.1
+ip route add default via 192.168.32.1 dev eth0
 
-cat b1_supplicant.conf > /etc/wpa_supplicant.conf
+# Install supplicant config
+cat "$SUPPLICANT_CONF" > /etc/wpa_supplicant.conf
 
-# start wpa_supplicant in background
-wpa_supplicant -B -c/etc/wpa_supplicant.conf -Dwired -ieth0
+echo "client-B1 deploy complete."
+
 ```
 
-###### b1_supplicant.conf
+`b1_supplicant.conf`:
+
 ```text
 ap_scan=0
 network={
@@ -1554,20 +1626,39 @@ network={
 }
 ```
 
+To run the supplicant deamon:
+
+```bash
+# Start wpa_supplicant in background
+wpa_supplicant -B -c /etc/wpa_supplicant.conf -D wired -i eth0
+```
 
 #### client-B2 Configuration
 
+###### `deploy.sh`
+
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SUPPLICANT_CONF="${SUPPLICANT_CONF:-/root/config/b2_supplicant.conf}"
+
+# Link up
+ip link set eth0 up
+
+# Addressing & route (idempotent)
 ip addr add 192.168.95.101/24 dev eth0
-ip route add default via 192.168.95.1
+ip route add default via 192.168.95.1 dev eth0
 
-cat b2_supplicant.conf > /etc/wpa_supplicant.conf
+# Install supplicant config
+cat "$SUPPLICANT_CONF" > /etc/wpa_supplicant.conf
 
-# start wpa_supplicant in background
-wpa_supplicant -B -c/etc/wpa_supplicant.conf -Dwired -ieth0
+echo "client-B2 deploy complete."
+
 ```
 
-###### b2_supplicant.conf
+`b2_supplicant.conf`:
+
 ```text
 ap_scan=0
 network={
@@ -1579,43 +1670,79 @@ network={
 }
 ```
 
----
+To run the supplicant deamon:
 
+```bash
+# Start wpa_supplicant in background
+wpa_supplicant -B -c /etc/wpa_supplicant.conf -D wired -i eth0
+```
+
+---
 
 ### VPN Site 3
 
 #### CE3 Configuration
 
-```text
+###### `deploy.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+# Ensure links up
+ip link set eth0 up
+ip link set eth1 up
+ip link set lo   up
+
+# vtysh configuration
+vtysh <<'VTY'
+configure terminal
+!
+! ---- Interfaces
 interface eth0
  ip address 10.1.3.2/30
 !
 interface eth1
  ip address 192.168.3.1/24
-```
-
-```text
+exit
+!
+! ---- BGP (CE3 ↔ PE R102)
 router bgp 65003
  network 192.168.3.0/24
  neighbor 10.1.3.1 remote-as 100
-```
+exit
+!
+end
+write memory
+VTY
 
+echo "CE3 deploy complete."
+
+```
 
 #### Radius Server Configuration
 
+###### `deploy.sh`
+
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
 ip addr add 192.168.3.101/24 dev eth0
 ip route add default via 192.168.3.1
 
-cat clients.conf > /etc/freeradius/3.0/clients.conf
-cat users.conf > /etc/freeradius/3.0/users
+cat /root/config/clients.conf > /etc/freeradius/3.0/clients.conf
+cat /root/config/users.conf   > /etc/freeradius/3.0/users
 
 service freeradius start
+
+echo "RADIUS deploy complete."
 ```
 
 Set the IP address of the authenticator device (i.e., the switch) from which the RADIUS server will receive authentication requests, and configure the shared secret used to secure the communication between the switch and the server.
 
-###### clients.conf
+`clients.conf`:
 
 ```text
 client cumulus1 {
@@ -1623,12 +1750,12 @@ client cumulus1 {
     secret = "rad1u5_5ecret"
     shortname = nsd_project
 }
-
 ```
 
 Configure the users' authentication details and define the VLAN IDs as attributes in the RADIUS response message, to be returned upon successful authentication.
 
-###### users.conf
+`users.conf`:
+
 ```text
 client-B1   Cleartext-Password := "pa55w0rd_b1"
             Service-Type = Framed-User,
@@ -1643,8 +1770,4 @@ client-B2   Cleartext-Password := "pa55w0rd_b2"
             Tunnel-Private-Group-ID = 95
 ```
 
-
 ---
-
-
-
