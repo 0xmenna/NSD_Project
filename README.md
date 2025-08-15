@@ -130,8 +130,8 @@ net.mpls.conf.mainVPN.input = 1
 net.mpls.platform_labels = 100000
 ```
 
-R101 is a border router, therefore it has been configured iBGP to route traffic towards other edge routers to reach the different customer sites.
-This configuration forms an overlay newtork between border routers to properly manage routing internally, within AS100. Each border router must know each other. Additionally, the configuration allows to route traffic dynamically between the customer edge and the provider edge, without requiring a less flexible static configuration.
+R101 is a border router and is configured with iBGP to distribute routes that provide reachability to all customer sites.
+This configuration establishes an overlay network between the border routers, with each router having knowledge of the others. It also enables dynamic route exchange with the customer edge (CE1), removing the need for less flexible static configurations.
 
 The configuration also defines:
 
